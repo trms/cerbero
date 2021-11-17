@@ -1,0 +1,59 @@
+From 30eafd30bec5bf848320239d9c74f5d4f446929b Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Wed, 18 Nov 2020 19:58:53 +0100
+Subject: [PATCH] decodebin: make sure we are the ones to sync the state of our
+ parsebin
+
+---
+ gst/playback/gstdecodebin3.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/gst/playback/gstdecodebin3.c b/gst/playback/gstdecodebin3.c
+index 968a6347f..2ee73968f 100644
+--- a/gst/playback/gstdecodebin3.c
++++ b/gst/playback/gstdecodebin3.c
+@@ -799,14 +799,18 @@ ensure_input_parsebin (GstDecodebin3 * dbin, DecodebinInput * input)
+   }
+ 
+   if (GST_OBJECT_PARENT (GST_OBJECT (input->parsebin)) != GST_OBJECT (dbin)) {
++    gst_element_set_locked_state (input->parsebin, TRUE);
+     gst_bin_add (GST_BIN (dbin), input->parsebin);
+     set_state = TRUE;
+   }
+ 
+   gst_ghost_pad_set_target (GST_GHOST_PAD (input->ghost_sink),
+       input->parsebin_sink);
+-  if (set_state)
++
++  if (set_state) {
+     gst_element_sync_state_with_parent (input->parsebin);
++    gst_element_set_locked_state (input->parsebin, FALSE);
++  }
+ 
+   return TRUE;
+ 
+@@ -1986,8 +1990,8 @@ get_slot_for_input (GstDecodebin3 * dbin, DecodebinInputStream * input)
+ 
+   GST_DEBUG_OBJECT (dbin, "input %p (stream %p %s)",
+       input, input->active_stream,
+-      input->
+-      active_stream ? gst_stream_get_stream_id (input->active_stream) : "");
++      input->active_stream ? gst_stream_get_stream_id (input->
++          active_stream) : "");
+ 
+   if (input->active_stream) {
+     input_type = gst_stream_get_stream_type (input->active_stream);
+@@ -2547,9 +2551,8 @@ handle_stream_switch (GstDecodebin3 * dbin, GList * select_streams,
+       if (slot_to_deactivate) {
+         GST_DEBUG_OBJECT (dbin,
+             "Slot %p (%s) should be deactivated, no longer used", slot,
+-            slot->
+-            active_stream ? gst_stream_get_stream_id (slot->active_stream) :
+-            "NULL");
++            slot->active_stream ? gst_stream_get_stream_id (slot->
++                active_stream) : "NULL");
+         to_deactivate = g_list_append (to_deactivate, slot);
+       }
+     }
+-- 
+2.26.2

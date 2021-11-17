@@ -4,6 +4,7 @@ class Recipe(custom.GStreamer):
     name = 'gst-plugins-good-1.0'
     btype = BuildType.MESON
     tarball_checksum = '4be92e021144bc6dca5082d028275d4b6e69183c01b90791e0837173d58d4e2e'
+    patches=['./trms-patches/gst-plugins-good-1.0-1352-qtdemux.patch']
     meson_options = {# enabled plugins
                      'cairo': 'enabled',
                      'dv': 'enabled',

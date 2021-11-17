@@ -1,0 +1,91 @@
+From e56a52053ad6fc662360edc2b72ef6bf1604db3e Mon Sep 17 00:00:00 2001
+From: Edward Hervey <edward@centricular.com>
+Date: Tue, 4 Feb 2020 14:15:31 +0100
+Subject: [PATCH] adaptivemux: Only store/use QoS values when needed
+
+Let subclass specify whether they will use QoS information or not.
+
+This avoids having to take the manifest lock, which can potentially
+be held for some time (while manifest is downloaded/updated). The
+problem with this is that the thread reporting the QoS value is the
+rendering thread and this will cause "hangs" in the video rendering.
+---
+ ext/dash/gstdashdemux.c                       |  2 ++
+ gst-libs/gst/adaptivedemux/gstadaptivedemux.c | 15 +++++++++++++++
+ gst-libs/gst/adaptivedemux/gstadaptivedemux.h |  3 +++
+ 3 files changed, 20 insertions(+)
+
+diff --git a/ext/dash/gstdashdemux.c b/ext/dash/gstdashdemux.c
+index 8aecfafa48..9ddd966f85 100644
+--- a/ext/dash/gstdashdemux.c
++++ b/ext/dash/gstdashdemux.c
+@@ -671,6 +671,8 @@ gst_dash_demux_init (GstDashDemux * demux)
+ 
+   gst_adaptive_demux_set_stream_struct_size (GST_ADAPTIVE_DEMUX_CAST (demux),
+       sizeof (GstDashDemuxStream));
++  /* We are interested in having QoS values reported */
++  gst_adaptive_demux_handle_qos (GST_ADAPTIVE_DEMUX_CAST (demux), TRUE);
+ }
+ 
+ static void
+diff --git a/gst-libs/gst/adaptivedemux/gstadaptivedemux.c b/gst-libs/gst/adaptivedemux/gstadaptivedemux.c
+index 9b5aba037b..8a0e8d7155 100644
+--- a/gst-libs/gst/adaptivedemux/gstadaptivedemux.c
++++ b/gst-libs/gst/adaptivedemux/gstadaptivedemux.c
+@@ -205,6 +205,9 @@ struct _GstAdaptiveDemuxPrivate
+    * without needing to stop tasks when they just want to
+    * update the segment boundaries */
+   GMutex segment_lock;
++
++  /* Whether to store QoS or not */
++  gboolean handle_qos;
+ };
+ 
+ typedef struct _GstAdaptiveDemuxTimer
+@@ -520,6 +523,7 @@ gst_adaptive_demux_init (GstAdaptiveDemux * demux,
+   /* Properties */
+   demux->bitrate_limit = DEFAULT_BITRATE_LIMIT;
+   demux->connection_speed = DEFAULT_CONNECTION_SPEED;
++  demux->priv->handle_qos = FALSE;
+ 
+   gst_element_add_pad (GST_ELEMENT (demux), demux->sinkpad);
+ }
+@@ -1909,6 +1913,8 @@ gst_adaptive_demux_src_event (GstPad * pad, GstObject * parent,
+     case GST_EVENT_QOS:{
+       GstAdaptiveDemuxStream *stream;
+ 
++      if (!demux->priv->handle_qos)
++        break;
+       GST_MANIFEST_LOCK (demux);
+       stream = gst_adaptive_demux_find_stream_for_pad (demux, pad);
+ 
+@@ -4643,3 +4649,12 @@ gst_adaptive_demux_clock_callback (GstClock * clock,
+   g_mutex_unlock (timer->mutex);
+   return TRUE;
+ }
++
++void
++gst_adaptive_demux_handle_qos (GstAdaptiveDemux * demux, gboolean handle_qos)
++{
++  g_return_if_fail (GST_IS_ADAPTIVE_DEMUX (demux));
++
++  GST_DEBUG_OBJECT (demux, "handle_qos:%d", handle_qos);
++  demux->priv->handle_qos = handle_qos;
++}
+diff --git a/gst-libs/gst/adaptivedemux/gstadaptivedemux.h b/gst-libs/gst/adaptivedemux/gstadaptivedemux.h
+index 9de70dafec..33b86b920c 100644
+--- a/gst-libs/gst/adaptivedemux/gstadaptivedemux.h
++++ b/gst-libs/gst/adaptivedemux/gstadaptivedemux.h
+@@ -532,6 +532,9 @@ GDateTime *gst_adaptive_demux_get_client_now_utc (GstAdaptiveDemux * demux);
+ GST_ADAPTIVE_DEMUX_API
+ gboolean gst_adaptive_demux_is_running (GstAdaptiveDemux * demux);
+ 
++GST_ADAPTIVE_DEMUX_API
++void gst_adaptive_demux_handle_qos (GstAdaptiveDemux *demux, gboolean handle_qos);
++
+ G_END_DECLS
+ 
+ #endif
+-- 
+GitLab
+

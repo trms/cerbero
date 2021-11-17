@@ -1,0 +1,33 @@
+From 69d429f45f2d0d98e0199aa046de39bf93bdbf71 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Tue, 24 Nov 2020 12:46:28 +0100
+Subject: [PATCH] gstpad: check EOS / FLUSHING again after running probes in
+ chain
+
+When for example a probe sends out an EOS event, we don't want
+to run the chain function with the buffer that triggered the
+probe.
+---
+ gst/gstpad.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/gst/gstpad.c b/gst/gstpad.c
+index 6ae914bbc7..187bff47dd 100644
+--- a/gst/gstpad.c
++++ b/gst/gstpad.c
+@@ -4378,6 +4378,12 @@ gst_pad_chain_data_unchecked (GstPad * pad, GstPadProbeType type, void *data)
+ 
+   PROBE_HANDLE (pad, type, data, probe_stopped, probe_handled);
+ 
++  if (G_UNLIKELY (GST_PAD_IS_FLUSHING (pad)))
++    goto flushing;
++
++  if (G_UNLIKELY (GST_PAD_IS_EOS (pad)))
++    goto eos;
++
+   ACQUIRE_PARENT (pad, parent, no_parent);
+   GST_OBJECT_UNLOCK (pad);
+ 
+-- 
+GitLab
+

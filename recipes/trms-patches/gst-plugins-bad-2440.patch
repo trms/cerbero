@@ -1,0 +1,28 @@
+From 45d2c703ca6e7b30aaa0df48eed9711e782f91c6 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Tue, 27 Jul 2021 23:53:06 +0200
+Subject: [PATCH] cccombiner: fix CDP padding detection
+
+While a cc_data_pkt with cc_valid 0 should be considered padding,
+it might be followed up by valid DTVCC packets, and should not
+cause the whole CDP packet to get discarded.
+---
+ ext/closedcaption/gstcccombiner.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ext/closedcaption/gstcccombiner.c b/ext/closedcaption/gstcccombiner.c
+index aef5e6c366..d0bb23c728 100644
+--- a/ext/closedcaption/gstcccombiner.c
++++ b/ext/closedcaption/gstcccombiner.c
+@@ -450,7 +450,7 @@ schedule_cdp (GstCCCombiner * self, const GstVideoTimeCode * tc,
+       guint8 cc_type = cc_data[i * 3] & 0x03;
+ 
+       if (!cc_valid)
+-        break;
++        continue;
+ 
+       if (cc_type == 0x00 || cc_type == 0x01) {
+         if (cc_data[i * 3 + 1] != 0x80 || cc_data[i * 3 + 2] != 0x80) {
+-- 
+GitLab
+

@@ -1,0 +1,89 @@
+From fedd6c2a28e1abd34b6e590e5c060c87c7e9231b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Thu, 2 Sep 2021 08:38:54 +0300
+Subject: [PATCH] avidemux: Also detect 0x000001 as H264 byte-stream start code
+ in codec_data
+
+This works around some AVI files storing byte-stream data in the
+codec_data. The previous workaround was only checking for
+0x00000001 (4 bytes) instead of 0x000001 (3 bytes).
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-good/-/merge_requests/1072>
+---
+ gst/avi/gstavidemux.c | 59 +++++++++++++++++++++----------------------
+ 1 file changed, 29 insertions(+), 30 deletions(-)
+
+diff --git a/gst/avi/gstavidemux.c b/gst/avi/gstavidemux.c
+index 7b01d04d5..e25085f7f 100644
+--- a/gst/avi/gstavidemux.c
++++ b/gst/avi/gstavidemux.c
+@@ -1968,37 +1968,36 @@ gst_avi_demux_check_caps (GstAviDemux * avi, GstAviStream * stream,
+       gst_structure_remove_field (s, "palette_data");
+       return caps;
+     }
+-  } else if (!gst_structure_has_name (s, "video/x-h264")) {
+-    return caps;
+-  }
+-
+-  GST_DEBUG_OBJECT (avi, "checking caps %" GST_PTR_FORMAT, caps);
+-
+-  /* some muxers put invalid bytestream stuff in h264 extra data */
+-  val = gst_structure_get_value (s, "codec_data");
+-  if (val && (buf = gst_value_get_buffer (val))) {
+-    guint8 *data;
+-    gint size;
+-    GstMapInfo map;
+-
+-    gst_buffer_map (buf, &map, GST_MAP_READ);
+-    data = map.data;
+-    size = map.size;
+-    if (size >= 4) {
+-      guint32 h = GST_READ_UINT32_BE (data);
+-      gst_buffer_unmap (buf, &map);
+-      if (h == 0x01) {
+-        /* can hardly be valid AVC codec data */
+-        GST_DEBUG_OBJECT (avi,
+-            "discarding invalid codec_data containing byte-stream");
+-        /* so do not pretend to downstream that it is packetized avc */
+-        gst_structure_remove_field (s, "codec_data");
+-        /* ... but rather properly parsed bytestream */
+-        gst_structure_set (s, "stream-format", G_TYPE_STRING, "byte-stream",
+-            "alignment", G_TYPE_STRING, "au", NULL);
++  } else if (gst_structure_has_name (s, "video/x-h264")) {
++    GST_DEBUG_OBJECT (avi, "checking caps %" GST_PTR_FORMAT, caps);
++
++    /* some muxers put invalid bytestream stuff in h264 extra data */
++    val = gst_structure_get_value (s, "codec_data");
++    if (val && (buf = gst_value_get_buffer (val))) {
++      guint8 *data;
++      gint size;
++      GstMapInfo map;
++
++      gst_buffer_map (buf, &map, GST_MAP_READ);
++      data = map.data;
++      size = map.size;
++      if (size >= 4) {
++        guint32 h = GST_READ_UINT32_BE (data);
++
++        gst_buffer_unmap (buf, &map);
++        if (h == 0x01 || (h >> 8) == 0x01) {
++          /* can hardly be valid AVC codec data */
++          GST_DEBUG_OBJECT (avi,
++              "discarding invalid codec_data containing byte-stream");
++          /* so do not pretend to downstream that it is packetized avc */
++          gst_structure_remove_field (s, "codec_data");
++          /* ... but rather properly parsed bytestream */
++          gst_structure_set (s, "stream-format", G_TYPE_STRING, "byte-stream",
++              "alignment", G_TYPE_STRING, "au", NULL);
++        }
++      } else {
++        gst_buffer_unmap (buf, &map);
+       }
+-    } else {
+-      gst_buffer_unmap (buf, &map);
+     }
+   }
+ 
+-- 
+GitLab
+

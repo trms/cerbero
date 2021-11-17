@@ -1,0 +1,132 @@
+From 578808b2cb9384e04b425e49c971f1ce73b416ab Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Sat, 12 Dec 2020 18:17:41 -0500
+Subject: [PATCH 4/4] Add preroll
+
+---
+ sys/decklink/gstdecklink.h            |  3 ++
+ sys/decklink/gstdecklinkvideosink.cpp | 49 ++++++++++++++++-----------
+ 2 files changed, 32 insertions(+), 20 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.h b/sys/decklink/gstdecklink.h
+index 97522c6c7..1fc46fc69 100644
+--- a/sys/decklink/gstdecklink.h
++++ b/sys/decklink/gstdecklink.h
+@@ -257,6 +257,9 @@ struct _GstDecklinkOutput {
+   GstElement *videosink;
+   gboolean video_enabled;
+   void (*start_scheduled_playback) (GstElement *videosink);
++
++  guint64 frame_count;
++  GstClockTime first_scheduled_frame;
+ };
+ 
+ typedef struct _GstDecklinkInput GstDecklinkInput;
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 51cb5bd88..a331b998b 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -198,11 +198,11 @@ public:
+ 
+     switch (result) {
+       case bmdOutputFrameCompleted:
+-        GST_ERROR_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
++        GST_DEBUG_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDisplayedLate:
+-        GST_ERROR_OBJECT (m_sink, "Late frame %p for %" GST_TIME_FORMAT,
++        GST_WARNING_OBJECT (m_sink, "Late frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDropped:
+@@ -725,7 +725,7 @@ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+   gint stride;
+   GstVideoTimeCodeMeta *tc_meta;
+ 
+-  GST_ERROR_OBJECT (self, "Rendering buffer %" GST_PTR_FORMAT, buffer);
++  GST_INFO_OBJECT (self, "Rendering buffer %" GST_PTR_FORMAT, buffer);
+ 
+   // FIXME: Handle no timestamps
+   if (!GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
+@@ -749,7 +749,7 @@ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+       gst_segment_to_running_time (&GST_BASE_SINK_CAST (self)->segment,
+       GST_FORMAT_TIME, timestamp + duration) - running_time;
+ 
+-  GST_ERROR ("Rendering with rtime %" GST_TIME_FORMAT, GST_TIME_ARGS (running_time));
++  GST_INFO_OBJECT (self, "Rendering with rtime %" GST_TIME_FORMAT, GST_TIME_ARGS (running_time));
+ 
+   ret = self->output->output->CreateVideoFrame (self->info.width,
+       self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
+@@ -809,7 +809,7 @@ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+ 
+   write_vbi (self, buffer, format, frame, tc_meta);
+ 
+-  GST_ERROR_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
++  GST_INFO_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
+       " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
+       GST_TIME_ARGS (running_time_duration));
+ 
+@@ -822,6 +822,29 @@ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+     goto out;
+   }
+ 
++  if (self->output->frame_count == 0) {
++    self->output->first_scheduled_frame = running_time;
++  }
++
++  self->output->frame_count++;
++
++  if (self->output->frame_count == 3) {
++    GST_INFO_OBJECT (self,
++      "Starting scheduled playback at %" GST_TIME_FORMAT,
++      GST_TIME_ARGS (self->output->first_scheduled_frame));
++
++    ret =
++        self->output->output->StartScheduledPlayback (self->output->first_scheduled_frame,
++        GST_SECOND, 1.0);
++    if (ret != S_OK) {
++      GST_ELEMENT_ERROR (self, STREAM, FAILED,
++          (NULL), ("Failed to start scheduled playback: 0x%08lx",
++              (unsigned long) ret));
++      flow_ret = GST_FLOW_ERROR;
++      goto out;
++    }
++  }
++
+   {
+     GstClockTime decklink_time;
+     gdouble rate;
+@@ -829,7 +852,7 @@ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+ 
+     self->output->output->GetScheduledStreamTime(GST_SECOND, (BMDTimeValue *) &decklink_time, &rate);
+     diff = running_time - decklink_time;
+-    GST_ERROR ("Decklink Diff %ld", diff);
++     GST_LOG_OBJECT (self, "Converted %ld", diff);
+   }
+ 
+   flow_ret = GST_FLOW_OK;
+@@ -1512,20 +1535,6 @@ gst_decklink_video_sink_start_scheduled_playback (GstElement * element)
+     _wait_for_stop_notify (self);
+   }
+ 
+-  GST_ERROR_OBJECT (self,
+-      "Starting scheduled playback at %" GST_TIME_FORMAT,
+-      GST_TIME_ARGS (start_time));
+-
+-  res =
+-      self->output->output->StartScheduledPlayback (self->decklink_base_time,
+-      GST_SECOND, 1.0);
+-  if (res != S_OK) {
+-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
+-        (NULL), ("Failed to start scheduled playback: 0x%08lx",
+-            (unsigned long) res));
+-    return;
+-  }
+-
+   self->output->started = TRUE;
+ }
+ 
+-- 
+2.20.1.windows.1
+

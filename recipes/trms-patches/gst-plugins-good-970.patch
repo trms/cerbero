@@ -1,0 +1,109 @@
+From 7c5f2185a97f4a8bec22d7355e1480816fcfeca2 Mon Sep 17 00:00:00 2001
+From: Jan Schmidt <jan@centricular.com>
+Date: Fri, 30 Apr 2021 08:12:47 +1000
+Subject: [PATCH] qtmux: Make sure to write 64-bit STCO table when needed.
+
+qtmux attempts to choose between writing a 32-bit stco chunk offset table
+when it can, but switch to a 64-bit co64 table when file offsets go over
+4GB.
+
+This patch fixes a problem where the atom handling code was checking
+mdat-relative offsets instead of the final file offset (computed by
+adding the mdat position plus the mdat-relative offset) - leading to
+problems where files with a size between 4GB and 4GB+offset-of-the-mdat
+would write incorrect STCO tables with some samples having truncated
+32-bit offsets.
+
+Smaller files write STCO correctly, larger files would switch to
+co64 and also output correctly.
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-good/-/merge_requests/970>
+---
+ gst/isomp4/atoms.c | 25 +++++++++++++++++++------
+ gst/isomp4/atoms.h |  6 +++++-
+ 2 files changed, 24 insertions(+), 7 deletions(-)
+
+diff --git a/gst/isomp4/atoms.c b/gst/isomp4/atoms.c
+index e439c0bb1..2935d5c75 100644
+--- a/gst/isomp4/atoms.c
++++ b/gst/isomp4/atoms.c
+@@ -850,6 +850,9 @@ atom_co64_init (AtomSTCO64 * co64)
+   guint8 flags[3] = { 0, 0, 0 };
+ 
+   atom_full_init (&co64->header, FOURCC_stco, 0, 0, 0, flags);
++
++  co64->chunk_offset = 0;
++  co64->max_offset = 0;
+   atom_array_init (&co64->entries, 256);
+ }
+ 
+@@ -2422,7 +2425,17 @@ atom_stco64_copy_data (AtomSTCO64 * stco64, guint8 ** buffer, guint64 * size,
+ {
+   guint64 original_offset = *offset;
+   guint i;
+-  gboolean trunc_to_32 = stco64->header.header.type == FOURCC_stco;
++
++  /* If any (mdat-relative) offset will by over 32-bits when converted to an
++   * absolute file offset then we need to write a 64-bit co64 atom, otherwise
++   * we can write a smaller stco 32-bit table */
++  gboolean write_stco64 =
++      (stco64->max_offset + stco64->chunk_offset) > G_MAXUINT32;
++
++  if (write_stco64)
++    stco64->header.header.type = FOURCC_co64;
++  else
++    stco64->header.header.type = FOURCC_stco;
+ 
+   if (!atom_full_copy_data (&stco64->header, buffer, size, offset)) {
+     return 0;
+@@ -2438,10 +2451,10 @@ atom_stco64_copy_data (AtomSTCO64 * stco64, guint8 ** buffer, guint64 * size,
+     guint64 value =
+         atom_array_index (&stco64->entries, i) + stco64->chunk_offset;
+ 
+-    if (trunc_to_32) {
+-      prop_copy_uint32 ((guint32) value, buffer, size, offset);
+-    } else {
++    if (write_stco64) {
+       prop_copy_uint64 (value, buffer, size, offset);
++    } else {
++      prop_copy_uint32 ((guint32) value, buffer, size, offset);
+     }
+   }
+ 
+@@ -3171,8 +3184,8 @@ atom_stco64_add_entry (AtomSTCO64 * stco64, guint64 entry)
+     return FALSE;
+ 
+   atom_array_append (&stco64->entries, entry, 256);
+-  if (entry > G_MAXUINT32)
+-    stco64->header.header.type = FOURCC_co64;
++  if (entry > stco64->max_offset)
++    stco64->max_offset = entry;
+ 
+   return TRUE;
+ }
+diff --git a/gst/isomp4/atoms.h b/gst/isomp4/atoms.h
+index 8f34048f3..33d1525d4 100644
+--- a/gst/isomp4/atoms.h
++++ b/gst/isomp4/atoms.h
+@@ -548,13 +548,17 @@ typedef struct _AtomTREF
+ 
+ /*
+  * used for both STCO and CO64
+- * if used as STCO, entries should be truncated to use only 32bits
++ * The table will be written out as STCO automatically when
++ * the offsets being written will fit in a 32-bit table,
++ * otherwise it is written as CO64
+  */
+ typedef struct _AtomSTCO64
+ {
+   AtomFull header;
+   /* Global offset to add to entries when serialising */
+   guint32 chunk_offset;
++  /* Maximum offset stored in the table */
++  guint64 max_offset;
+   ATOM_ARRAY (guint64) entries;
+ } AtomSTCO64;
+ 
+-- 
+GitLab
+

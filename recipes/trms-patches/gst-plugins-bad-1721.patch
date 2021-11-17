@@ -1,0 +1,729 @@
+From 1487d240f9cef704bbb2de20fc781f23517bf895 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Sun, 25 Oct 2020 13:13:37 +0200
+Subject: [PATCH 1/5] decklink: Remove some dead code
+
+---
+ sys/decklink/gstdecklink.cpp | 36 ------------------------------------
+ 1 file changed, 36 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.cpp b/sys/decklink/gstdecklink.cpp
+index 5637b1018d..8570b14410 100644
+--- a/sys/decklink/gstdecklink.cpp
++++ b/sys/decklink/gstdecklink.cpp
+@@ -887,10 +887,6 @@ struct _Device
+ ProfileSetOperationResult gst_decklink_configure_profile (Device * device,
+     BMDProfileID profile_id);
+ 
+-Device *gst_decklink_find_device_by_persistent_id (int64_t persistent_id);
+-gboolean gst_decklink_device_has_persistent_id (Device * device,
+-    int64_t persistent_id);
+-
+ class GStreamerDecklinkInputCallback:public IDeckLinkInputCallback
+ {
+ private:
+@@ -1866,38 +1862,6 @@ gst_decklink_configure_profile (Device * device, BMDProfileID profile_id)
+   }
+ }
+ 
+-gboolean
+-gst_decklink_device_has_persistent_id (Device * device, int64_t persistent_id)
+-{
+-  HRESULT result;
+-  int64_t this_device_persistent_id;
+-
+-  GstDecklinkInput *input = &device->input;
+-
+-  result =
+-      input->attributes->GetInt (BMDDeckLinkPersistentID,
+-      &this_device_persistent_id);
+-  return (result == S_OK) && (this_device_persistent_id == persistent_id);
+-}
+-
+-Device *
+-gst_decklink_find_device_by_persistent_id (int64_t persistent_id)
+-{
+-  GST_DEBUG ("Searching Device by persistent ID %" G_GINT64_FORMAT,
+-      (gint64) persistent_id);
+-
+-  for (guint index = 0; index < devices->len; index++) {
+-    Device *device = (Device *) g_ptr_array_index (devices, index);
+-
+-    if (gst_decklink_device_has_persistent_id (device, persistent_id)) {
+-      GST_DEBUG ("Found matching Device %u", index);
+-      return device;
+-    }
+-  }
+-
+-  return NULL;
+-}
+-
+ G_DEFINE_TYPE (GstDecklinkClock, gst_decklink_clock, GST_TYPE_SYSTEM_CLOCK);
+ 
+ static GstClockTime gst_decklink_clock_get_internal_time (GstClock * clock);
+-- 
+GitLab
+
+
+From eaa1fc98f73c5515000eb4d3afd9184490d55b09 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Sun, 25 Oct 2020 13:14:11 +0200
+Subject: [PATCH 2/5] decklink: Mark internal function as static
+
+---
+ sys/decklink/gstdecklink.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.cpp b/sys/decklink/gstdecklink.cpp
+index 8570b14410..d20dfb4441 100644
+--- a/sys/decklink/gstdecklink.cpp
++++ b/sys/decklink/gstdecklink.cpp
+@@ -884,7 +884,7 @@ struct _Device
+   GstDecklinkDevice *devices[4];
+ };
+ 
+-ProfileSetOperationResult gst_decklink_configure_profile (Device * device,
++static ProfileSetOperationResult gst_decklink_configure_profile (Device * device,
+     BMDProfileID profile_id);
+ 
+ class GStreamerDecklinkInputCallback:public IDeckLinkInputCallback
+@@ -1825,7 +1825,7 @@ gst_decklink_release_nth_input (gint n, GstElement * src, gboolean is_audio)
+   g_mutex_unlock (&input->lock);
+ }
+ 
+-ProfileSetOperationResult
++static ProfileSetOperationResult
+ gst_decklink_configure_profile (Device * device, BMDProfileID profile_id)
+ {
+   HRESULT res;
+-- 
+GitLab
+
+
+From b8786e26f6e59dc21d3608e4c35ed57aa96880b6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Sun, 25 Oct 2020 13:30:55 +0200
+Subject: [PATCH 3/5] decklink: Add a default profile id
+
+This causes no changes to the profile but keeps the existing settings.
+The profile can also be changed from e.g. the card's configuration
+application and in that case probably should be left alone.
+
+The default is the new value as it keeps the profile setting as it is,
+which is consistent with the previous behaviour in 1.18.
+---
+ sys/decklink/gstdecklink.cpp          | 73 ++++++++++++---------------
+ sys/decklink/gstdecklink.h            |  1 +
+ sys/decklink/gstdecklinkvideosink.cpp | 11 ++--
+ sys/decklink/gstdecklinkvideosink.h   |  2 +-
+ sys/decklink/gstdecklinkvideosrc.cpp  | 11 ++--
+ sys/decklink/gstdecklinkvideosrc.h    |  2 +-
+ 6 files changed, 44 insertions(+), 56 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.cpp b/sys/decklink/gstdecklink.cpp
+index d20dfb4441..346cd56e52 100644
+--- a/sys/decklink/gstdecklink.cpp
++++ b/sys/decklink/gstdecklink.cpp
+@@ -158,6 +158,7 @@ gst_decklink_video_format_get_type (void)
+ 
+ /**
+  * GstDecklinkProfileId:
++ * @GST_DECKLINK_PROFILE_ID_DEFAULT: Don't change the profile
+  * @GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX: Equivalent to bmdProfileOneSubDeviceFullDuplex
+  * @GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX: Equivalent to bmdProfileOneSubDeviceHalfDuplex
+  * @GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX: Equivalent to bmdProfileTwoSubDevicesFullDuplex
+@@ -173,6 +174,7 @@ gst_decklink_profile_id_get_type (void)
+ {
+   static gsize id = 0;
+   static const GEnumValue types[] = {
++    {GST_DECKLINK_PROFILE_ID_DEFAULT, "Default, don't change profile", "default"},
+     {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX, "One sub-device, Full-Duplex", "one-sub-device-full"},
+     {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX, "One sub-device, Half-Duplex", "one-sub-device-half"},
+     {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX, "Two sub-devices, Full-Duplex", "two-sub-devices-full"},
+@@ -366,20 +368,6 @@ static const struct
+   /* *INDENT-ON* */
+ };
+ 
+-static const struct
+-{
+-  BMDProfileID profile;
+-  GstDecklinkProfileId gstprofile;
+-} profiles[] = {
+-  /* *INDENT-OFF* */
+-  {bmdProfileOneSubDeviceFullDuplex, GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX},
+-  {bmdProfileOneSubDeviceHalfDuplex, GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX},
+-  {bmdProfileTwoSubDevicesFullDuplex, GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX},
+-  {bmdProfileTwoSubDevicesHalfDuplex, GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX},
+-  {bmdProfileFourSubDevicesHalfDuplex, GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX},
+-  /* *INDENT-ON* */
+-};
+-
+ enum ProfileSetOperationResult
+ {
+   PROFILE_SET_UNSUPPORTED,
+@@ -614,25 +602,6 @@ gst_decklink_timecode_format_to_enum (BMDTimecodeFormat f)
+   return GST_DECKLINK_TIMECODE_FORMAT_RP188ANY;
+ }
+ 
+-const BMDProfileID
+-gst_decklink_profile_id_from_enum (GstDecklinkProfileId p)
+-{
+-  return profiles[p].profile;
+-}
+-
+-const GstDecklinkProfileId
+-gst_decklink_profile_id_to_enum (BMDProfileID p)
+-{
+-  guint i;
+-
+-  for (i = 0; i < G_N_ELEMENTS (profiles); i++) {
+-    if (profiles[i].profile == p)
+-      return profiles[i].gstprofile;
+-  }
+-  g_assert_not_reached ();
+-  return GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX;
+-}
+-
+ const BMDKeyerMode
+ gst_decklink_keyer_mode_from_enum (GstDecklinkKeyerMode m)
+ {
+@@ -885,7 +854,7 @@ struct _Device
+ };
+ 
+ static ProfileSetOperationResult gst_decklink_configure_profile (Device * device,
+-    BMDProfileID profile_id);
++    GstDecklinkProfileId profile_id);
+ 
+ class GStreamerDecklinkInputCallback:public IDeckLinkInputCallback
+ {
+@@ -1826,20 +1795,46 @@ gst_decklink_release_nth_input (gint n, GstElement * src, gboolean is_audio)
+ }
+ 
+ static ProfileSetOperationResult
+-gst_decklink_configure_profile (Device * device, BMDProfileID profile_id)
++gst_decklink_configure_profile (Device * device, GstDecklinkProfileId profile_id)
+ {
+   HRESULT res;
+ 
++  if (profile_id == GST_DECKLINK_PROFILE_ID_DEFAULT)
++    return PROFILE_SET_SUCCESS;
++
+   GstDecklinkInput *input = &device->input;
+   IDeckLink *decklink = input->device;
+ 
+   IDeckLinkProfileManager *manager = NULL;
+   if (decklink->QueryInterface(IID_IDeckLinkProfileManager, (void **)&manager) == S_OK) {
++    BMDProfileID bmd_profile_id;
++
++    switch (profile_id) {
++      case GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX:
++        bmd_profile_id = bmdProfileOneSubDeviceFullDuplex;
++        break;
++      case GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX:
++        bmd_profile_id = bmdProfileOneSubDeviceHalfDuplex;
++        break;
++      case GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX:
++        bmd_profile_id = bmdProfileTwoSubDevicesFullDuplex;
++        break;
++      case GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX:
++        bmd_profile_id = bmdProfileTwoSubDevicesHalfDuplex;
++        break;
++      case GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX:
++        bmd_profile_id = bmdProfileFourSubDevicesHalfDuplex;
++        break;
++      default:
++      case GST_DECKLINK_PROFILE_ID_DEFAULT:
++        g_assert_not_reached ();
++        break;
++    }
+ 
+     IDeckLinkProfile *profile = NULL;
+-    res = manager->GetProfile(profile_id, &profile);
++    res = manager->GetProfile(bmd_profile_id, &profile);
+ 
+-    if (res == S_OK) {
++    if (res == S_OK && profile) {
+       res = profile->SetActive();
+       profile->Release();
+     }
+@@ -1854,9 +1849,7 @@ gst_decklink_configure_profile (Device * device, BMDProfileID profile_id)
+       GST_ERROR("Failed to set profile.\n");
+       return PROFILE_SET_FAILURE;
+     }
+-  }
+-  else {
+-
++  } else {
+     GST_DEBUG("Device has only one profile.\n");
+     return PROFILE_SET_UNSUPPORTED;
+   }
+diff --git a/sys/decklink/gstdecklink.h b/sys/decklink/gstdecklink.h
+index 6ee0a13c2d..0e3e3d5bc7 100644
+--- a/sys/decklink/gstdecklink.h
++++ b/sys/decklink/gstdecklink.h
+@@ -161,6 +161,7 @@ typedef enum {
+ GType gst_decklink_video_format_get_type (void);
+ 
+ typedef enum {
++  GST_DECKLINK_PROFILE_ID_DEFAULT,
+   GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX, /* bmdProfileOneSubDeviceFullDuplex */
+   GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX, /* bmdProfileOneSubDeviceHalfDuplex */
+   GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX, /* bmdProfileTwoSubDevicesFullDuplex */
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 06b12a7e8f..140c83da9f 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -360,7 +360,7 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
+           "same profile group."
+           "DeckLink Duo 2 support configuration of the duplex mode of "
+           "individual sub-devices.",
+-          GST_TYPE_DECKLINK_PROFILE_ID, GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX,
++          GST_TYPE_DECKLINK_PROFILE_ID, GST_DECKLINK_PROFILE_ID_DEFAULT,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+               G_PARAM_CONSTRUCT)));
+ 
+@@ -428,7 +428,7 @@ gst_decklink_video_sink_init (GstDecklinkVideoSink * self)
+   self->mode = GST_DECKLINK_MODE_NTSC;
+   self->device_number = 0;
+   self->video_format = GST_DECKLINK_VIDEO_FORMAT_8BIT_YUV;
+-  self->profile_id = bmdProfileOneSubDeviceFullDuplex;
++  self->profile_id = GST_DECKLINK_PROFILE_ID_DEFAULT;
+   /* VITC is legacy, we should expect RP188 in modern use cases */
+   self->timecode_format = bmdTimecodeRP188Any;
+   self->caption_line = 0;
+@@ -467,9 +467,7 @@ gst_decklink_video_sink_set_property (GObject * object, guint property_id,
+       }
+       break;
+     case PROP_PROFILE_ID:
+-      self->profile_id =
+-          gst_decklink_profile_id_from_enum ((GstDecklinkProfileId)
+-          g_value_get_enum (value));
++      self->profile_id = (GstDecklinkProfileId) g_value_get_enum (value);
+       break;
+     case PROP_TIMECODE_FORMAT:
+       self->timecode_format =
+@@ -513,8 +511,7 @@ gst_decklink_video_sink_get_property (GObject * object, guint property_id,
+       g_value_set_enum (value, self->video_format);
+       break;
+     case PROP_PROFILE_ID:
+-      g_value_set_enum (value,
+-          gst_decklink_profile_id_to_enum (self->profile_id));
++      g_value_set_enum (value, self->profile_id);
+       break;
+     case PROP_TIMECODE_FORMAT:
+       g_value_set_enum (value,
+diff --git a/sys/decklink/gstdecklinkvideosink.h b/sys/decklink/gstdecklinkvideosink.h
+index fa88a86e79..dffe3a7f39 100644
+--- a/sys/decklink/gstdecklinkvideosink.h
++++ b/sys/decklink/gstdecklinkvideosink.h
+@@ -52,7 +52,7 @@ struct _GstDecklinkVideoSink
+   GstDecklinkModeEnum mode;
+   gint device_number;
+   GstDecklinkVideoFormat video_format;
+-  BMDProfileID profile_id;
++  GstDecklinkProfileId profile_id;
+   BMDTimecodeFormat timecode_format;
+   BMDKeyerMode keyer_mode;
+   gint keyer_level;
+diff --git a/sys/decklink/gstdecklinkvideosrc.cpp b/sys/decklink/gstdecklinkvideosrc.cpp
+index d9b56f5df3..d5b90e8ca3 100644
+--- a/sys/decklink/gstdecklinkvideosrc.cpp
++++ b/sys/decklink/gstdecklinkvideosrc.cpp
+@@ -317,7 +317,7 @@ gst_decklink_video_src_class_init (GstDecklinkVideoSrcClass * klass)
+           "same profile group."
+           "DeckLink Duo 2 support configuration of the duplex mode of "
+           "individual sub-devices.",
+-          GST_TYPE_DECKLINK_PROFILE_ID, GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX,
++          GST_TYPE_DECKLINK_PROFILE_ID, GST_DECKLINK_PROFILE_ID_DEFAULT,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+               G_PARAM_CONSTRUCT)));
+ 
+@@ -393,7 +393,7 @@ gst_decklink_video_src_init (GstDecklinkVideoSrc * self)
+   self->device_number = 0;
+   self->buffer_size = DEFAULT_BUFFER_SIZE;
+   self->video_format = GST_DECKLINK_VIDEO_FORMAT_AUTO;
+-  self->profile_id = bmdProfileOneSubDeviceFullDuplex;
++  self->profile_id = GST_DECKLINK_PROFILE_ID_DEFAULT;
+   self->timecode_format = bmdTimecodeRP188Any;
+   self->signal_state = SIGNAL_STATE_UNKNOWN;
+   self->output_stream_time = DEFAULT_OUTPUT_STREAM_TIME;
+@@ -469,9 +469,7 @@ gst_decklink_video_src_set_property (GObject * object, guint property_id,
+       }
+       break;
+     case PROP_PROFILE_ID:
+-      self->profile_id =
+-          gst_decklink_profile_id_from_enum ((GstDecklinkProfileId)
+-          g_value_get_enum (value));
++      self->profile_id = (GstDecklinkProfileId) g_value_get_enum (value);
+       break;
+     case PROP_TIMECODE_FORMAT:
+       self->timecode_format =
+@@ -522,8 +520,7 @@ gst_decklink_video_src_get_property (GObject * object, guint property_id,
+       g_value_set_enum (value, self->video_format);
+       break;
+     case PROP_PROFILE_ID:
+-      g_value_set_enum (value,
+-          gst_decklink_profile_id_to_enum (self->profile_id));
++      g_value_set_enum (value, self->profile_id);
+       break;
+     case PROP_TIMECODE_FORMAT:
+       g_value_set_enum (value,
+diff --git a/sys/decklink/gstdecklinkvideosrc.h b/sys/decklink/gstdecklinkvideosrc.h
+index b4f0e7bbfc..3213aa5b7a 100644
+--- a/sys/decklink/gstdecklinkvideosrc.h
++++ b/sys/decklink/gstdecklinkvideosrc.h
+@@ -71,7 +71,7 @@ struct _GstDecklinkVideoSrc
+ 
+   GstVideoInfo info;
+   GstDecklinkVideoFormat video_format;
+-  BMDProfileID profile_id;
++  GstDecklinkProfileId profile_id;
+   BMDTimecodeFormat timecode_format;
+ 
+   GstDecklinkInput *input;
+-- 
+GitLab
+
+
+From a7f7e83e04bd5d78981b1d36c30986d05a0b51fc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Sun, 25 Oct 2020 13:32:26 +0200
+Subject: [PATCH 4/5] decklink: Correctly indent everything
+
+---
+ sys/decklink/gstdecklink.cpp          | 89 ++++++++++++++++-----------
+ sys/decklink/gstdecklinkaudiosink.cpp | 14 +++--
+ sys/decklink/gstdecklinkaudiosrc.cpp  | 12 ++--
+ sys/decklink/gstdecklinkvideosink.cpp |  6 +-
+ sys/decklink/gstdecklinkvideosrc.cpp  | 10 +--
+ 5 files changed, 78 insertions(+), 53 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.cpp b/sys/decklink/gstdecklink.cpp
+index 346cd56e52..f199c2ecb5 100644
+--- a/sys/decklink/gstdecklink.cpp
++++ b/sys/decklink/gstdecklink.cpp
+@@ -88,11 +88,16 @@ gst_decklink_mode_get_type (void)
+     {GST_DECKLINK_MODE_2160p5994, "4k 59.94p", "2160p5994"},
+     {GST_DECKLINK_MODE_2160p60, "4k 60p", "2160p60"},
+ 
+-    {GST_DECKLINK_MODE_NTSC_WIDESCREEN, "NTSC SD 60i Widescreen", "ntsc-widescreen"},
+-    {GST_DECKLINK_MODE_NTSC2398_WIDESCREEN, "NTSC SD 60i Widescreen (24 fps)", "ntsc2398-widescreen"},
+-    {GST_DECKLINK_MODE_PAL_WIDESCREEN, "PAL SD 50i Widescreen", "pal-widescreen"},
+-    {GST_DECKLINK_MODE_NTSC_P_WIDESCREEN, "NTSC SD 60p Widescreen", "ntsc-p-widescreen"},
+-    {GST_DECKLINK_MODE_PAL_P_WIDESCREEN, "PAL SD 50p Widescreen", "pal-p-widescreen"},
++    {GST_DECKLINK_MODE_NTSC_WIDESCREEN, "NTSC SD 60i Widescreen",
++        "ntsc-widescreen"},
++    {GST_DECKLINK_MODE_NTSC2398_WIDESCREEN, "NTSC SD 60i Widescreen (24 fps)",
++        "ntsc2398-widescreen"},
++    {GST_DECKLINK_MODE_PAL_WIDESCREEN, "PAL SD 50i Widescreen",
++        "pal-widescreen"},
++    {GST_DECKLINK_MODE_NTSC_P_WIDESCREEN, "NTSC SD 60p Widescreen",
++        "ntsc-p-widescreen"},
++    {GST_DECKLINK_MODE_PAL_P_WIDESCREEN, "PAL SD 50p Widescreen",
++        "pal-p-widescreen"},
+ 
+     {0, NULL, NULL}
+   };
+@@ -174,12 +179,18 @@ gst_decklink_profile_id_get_type (void)
+ {
+   static gsize id = 0;
+   static const GEnumValue types[] = {
+-    {GST_DECKLINK_PROFILE_ID_DEFAULT, "Default, don't change profile", "default"},
+-    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX, "One sub-device, Full-Duplex", "one-sub-device-full"},
+-    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX, "One sub-device, Half-Duplex", "one-sub-device-half"},
+-    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX, "Two sub-devices, Full-Duplex", "two-sub-devices-full"},
+-    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX, "Two sub-devices, Half-Duplex", "two-sub-devices-half"},
+-    {GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX, "Four sub-devices, Half-Duplex", "four-sub-devices-half"},
++    {GST_DECKLINK_PROFILE_ID_DEFAULT, "Default, don't change profile",
++        "default"},
++    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX,
++        "One sub-device, Full-Duplex", "one-sub-device-full"},
++    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX,
++        "One sub-device, Half-Duplex", "one-sub-device-half"},
++    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX,
++        "Two sub-devices, Full-Duplex", "two-sub-devices-full"},
++    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX,
++        "Two sub-devices, Half-Duplex", "two-sub-devices-half"},
++    {GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX,
++        "Four sub-devices, Half-Duplex", "four-sub-devices-half"},
+     {0, NULL, NULL}
+   };
+ 
+@@ -853,8 +864,8 @@ struct _Device
+   GstDecklinkDevice *devices[4];
+ };
+ 
+-static ProfileSetOperationResult gst_decklink_configure_profile (Device * device,
+-    GstDecklinkProfileId profile_id);
++static ProfileSetOperationResult gst_decklink_configure_profile (Device *
++    device, GstDecklinkProfileId profile_id);
+ 
+ class GStreamerDecklinkInputCallback:public IDeckLinkInputCallback
+ {
+@@ -934,7 +945,8 @@ public:
+ 
+     /* Reset any timestamp observations we might've made */
+     if (m_input->videosrc) {
+-      GstDecklinkVideoSrc *videosrc = GST_DECKLINK_VIDEO_SRC (m_input->videosrc);
++      GstDecklinkVideoSrc *videosrc =
++          GST_DECKLINK_VIDEO_SRC (m_input->videosrc);
+ 
+       g_mutex_lock (&videosrc->lock);
+       videosrc->window_fill = 0;
+@@ -1104,7 +1116,7 @@ private:
+     while ((buf = (uint8_t *) gst_queue_array_pop_head (m_buffers))) {
+       uint8_t offset = *(buf - 1);
+       void *alloc_buf = buf - 128 + offset;
+-      g_free (alloc_buf);
++        g_free (alloc_buf);
+     }
+   }
+ 
+@@ -1544,8 +1556,7 @@ init_devices (gpointer data)
+       bool tmp_bool = false;
+       int64_t tmp_int = 2;
+ 
+-      dev->input.attributes->GetInt (BMDDeckLinkMaximumAudioChannels,
+-          &tmp_int);
++      dev->input.attributes->GetInt (BMDDeckLinkMaximumAudioChannels, &tmp_int);
+       dev->input.attributes->GetFlag (BMDDeckLinkSupportsInputFormatDetection,
+           &tmp_bool);
+       supports_format_detection = tmp_bool;
+@@ -1795,7 +1806,8 @@ gst_decklink_release_nth_input (gint n, GstElement * src, gboolean is_audio)
+ }
+ 
+ static ProfileSetOperationResult
+-gst_decklink_configure_profile (Device * device, GstDecklinkProfileId profile_id)
++gst_decklink_configure_profile (Device * device,
++    GstDecklinkProfileId profile_id)
+ {
+   HRESULT res;
+ 
+@@ -1806,7 +1818,8 @@ gst_decklink_configure_profile (Device * device, GstDecklinkProfileId profile_id
+   IDeckLink *decklink = input->device;
+ 
+   IDeckLinkProfileManager *manager = NULL;
+-  if (decklink->QueryInterface(IID_IDeckLinkProfileManager, (void **)&manager) == S_OK) {
++  if (decklink->QueryInterface (IID_IDeckLinkProfileManager,
++          (void **) &manager) == S_OK) {
+     BMDProfileID bmd_profile_id;
+ 
+     switch (profile_id) {
+@@ -1832,25 +1845,24 @@ gst_decklink_configure_profile (Device * device, GstDecklinkProfileId profile_id
+     }
+ 
+     IDeckLinkProfile *profile = NULL;
+-    res = manager->GetProfile(bmd_profile_id, &profile);
++    res = manager->GetProfile (bmd_profile_id, &profile);
+ 
+     if (res == S_OK && profile) {
+-      res = profile->SetActive();
+-      profile->Release();
++      res = profile->SetActive ();
++      profile->Release ();
+     }
+ 
+-    manager->Release();
++    manager->Release ();
+ 
+     if (res == S_OK) {
+-      GST_DEBUG("Successfully set profile.\n");
++      GST_DEBUG ("Successfully set profile.\n");
+       return PROFILE_SET_SUCCESS;
+-    }
+-    else {
+-      GST_ERROR("Failed to set profile.\n");
++    } else {
++      GST_ERROR ("Failed to set profile.\n");
+       return PROFILE_SET_FAILURE;
+     }
+   } else {
+-    GST_DEBUG("Device has only one profile.\n");
++    GST_DEBUG ("Device has only one profile.\n");
+     return PROFILE_SET_UNSUPPORTED;
+   }
+ }
+@@ -1962,14 +1974,21 @@ plugin_init (GstPlugin * plugin)
+   gst_device_provider_register (plugin, "decklinkdeviceprovider",
+       GST_RANK_PRIMARY, GST_TYPE_DECKLINK_DEVICE_PROVIDER);
+ 
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CHANNELS, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CONNECTION, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_PROFILE_ID, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_KEYER_MODE, (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CHANNELS,
++      (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CONNECTION,
++      (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_PROFILE_ID,
++      (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_KEYER_MODE,
++      (GstPluginAPIFlags) 0);
+   gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_MODE, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_TIMECODE_FORMAT, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_VIDEO_FORMAT, (GstPluginAPIFlags) 0);
+-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_CONNECTION, (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_TIMECODE_FORMAT,
++      (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_VIDEO_FORMAT,
++      (GstPluginAPIFlags) 0);
++  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_CONNECTION,
++      (GstPluginAPIFlags) 0);
+ 
+   return TRUE;
+ }
+diff --git a/sys/decklink/gstdecklinkaudiosink.cpp b/sys/decklink/gstdecklinkaudiosink.cpp
+index 546072485b..924caf1d14 100644
+--- a/sys/decklink/gstdecklinkaudiosink.cpp
++++ b/sys/decklink/gstdecklinkaudiosink.cpp
+@@ -684,7 +684,8 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+         GST_TIME_ARGS (buffered_time), buffered_samples);
+ 
+     {
+-      GstClockTimeDiff buffered_ahead_of_clock_ahead = GST_CLOCK_DIFF (clock_ahead, buffered_time);
++      GstClockTimeDiff buffered_ahead_of_clock_ahead =
++          GST_CLOCK_DIFF (clock_ahead, buffered_time);
+ 
+       GST_DEBUG_OBJECT (self, "driver is %" GST_STIME_FORMAT " ahead of the "
+           "expected clock", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
+@@ -693,9 +694,11 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+        * own synchronisation. It seems to count samples instead. */
+       /* FIXME: do we need to split buffers? */
+       if (buffered_ahead_of_clock_ahead > 0 &&
+-            buffered_ahead_of_clock_ahead > gst_base_sink_get_max_lateness (bsink)) {
+-        GST_DEBUG_OBJECT (self, "Dropping buffer that is %" GST_STIME_FORMAT
+-            " too late", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
++          buffered_ahead_of_clock_ahead >
++          gst_base_sink_get_max_lateness (bsink)) {
++        GST_DEBUG_OBJECT (self,
++            "Dropping buffer that is %" GST_STIME_FORMAT " too late",
++            GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
+         if (self->resampler)
+           gst_audio_resampler_reset (self->resampler);
+         flow_ret = GST_FLOW_OK;
+@@ -710,7 +713,8 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+ 
+       GST_DEBUG_OBJECT (self,
+           "Buffered enough, wait for preroll or the clock or flushing. "
+-          "Configured buffer time: %" GST_TIME_FORMAT, GST_TIME_ARGS (self->buffer_time));
++          "Configured buffer time: %" GST_TIME_FORMAT,
++          GST_TIME_ARGS (self->buffer_time));
+ 
+       if (wait_time < self->buffer_time)
+         wait_time = 0;
+diff --git a/sys/decklink/gstdecklinkaudiosrc.cpp b/sys/decklink/gstdecklinkaudiosrc.cpp
+index d35151d3e6..4ec47a81ca 100644
+--- a/sys/decklink/gstdecklinkaudiosrc.cpp
++++ b/sys/decklink/gstdecklinkaudiosrc.cpp
+@@ -547,20 +547,20 @@ gst_decklink_audio_src_got_packet (GstElement * element,
+     }
+ 
+     if (self->skipped_last == 0 && skipped_packets > 0) {
+-        GST_WARNING_OBJECT (self, "Starting to drop audio packets");
++      GST_WARNING_OBJECT (self, "Starting to drop audio packets");
+     }
+ 
+     if (skipped_packets == 0 && self->skipped_last > 0) {
+       GST_ELEMENT_WARNING_WITH_DETAILS (self,
+           STREAM, FAILED,
+           ("Dropped %u old packets from %" GST_TIME_FORMAT " to %"
+-          GST_TIME_FORMAT, self->skipped_last,
+-          GST_TIME_ARGS (self->skip_from_timestamp),
+-          GST_TIME_ARGS (self->skip_to_timestamp)),
++              GST_TIME_FORMAT, self->skipped_last,
++              GST_TIME_ARGS (self->skip_from_timestamp),
++              GST_TIME_ARGS (self->skip_to_timestamp)),
+           (NULL),
+           ("dropped", G_TYPE_UINT, self->skipped_last,
+-           "from", G_TYPE_UINT64, self->skip_from_timestamp,
+-           "to", G_TYPE_UINT64, self->skip_to_timestamp, NULL));
++              "from", G_TYPE_UINT64, self->skip_from_timestamp,
++              "to", G_TYPE_UINT64, self->skip_to_timestamp, NULL));
+       self->skipped_last = 0;
+     }
+     self->skipped_last += skipped_packets;
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 140c83da9f..e83b0329bf 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -1623,7 +1623,8 @@ gst_decklink_video_sink_change_state (GstElement * element,
+           self->internal_time_offset = self->internal_base_time;
+         } else if (GST_CLOCK_TIME_IS_VALID (self->internal_pause_time)) {
+           self->internal_time_offset +=
+-                  gst_clock_get_internal_time (self->output->clock) - self->internal_pause_time;
++              gst_clock_get_internal_time (self->output->clock) -
++              self->internal_pause_time;
+         }
+ 
+         GST_INFO_OBJECT (self, "clock has been set to %" GST_PTR_FORMAT
+@@ -1687,7 +1688,8 @@ gst_decklink_video_sink_change_state (GstElement * element,
+     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+       break;
+     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+-      self->internal_pause_time = gst_clock_get_internal_time (self->output->clock);
++      self->internal_pause_time =
++          gst_clock_get_internal_time (self->output->clock);
+       break;
+     default:
+       break;
+diff --git a/sys/decklink/gstdecklinkvideosrc.cpp b/sys/decklink/gstdecklinkvideosrc.cpp
+index d5b90e8ca3..4edeffd668 100644
+--- a/sys/decklink/gstdecklinkvideosrc.cpp
++++ b/sys/decklink/gstdecklinkvideosrc.cpp
+@@ -863,13 +863,13 @@ gst_decklink_video_src_got_frame (GstElement * element,
+       GST_ELEMENT_WARNING_WITH_DETAILS (self,
+           STREAM, FAILED,
+           ("Dropped %u old frames from %" GST_TIME_FORMAT " to %"
+-          GST_TIME_FORMAT, self->skipped_last,
+-          GST_TIME_ARGS (self->skip_from_timestamp),
+-          GST_TIME_ARGS (self->skip_to_timestamp)),
++              GST_TIME_FORMAT, self->skipped_last,
++              GST_TIME_ARGS (self->skip_from_timestamp),
++              GST_TIME_ARGS (self->skip_to_timestamp)),
+           (NULL),
+           ("dropped", G_TYPE_UINT, self->skipped_last,
+-           "from", G_TYPE_UINT64, self->skip_from_timestamp,
+-           "to", G_TYPE_UINT64, self->skip_to_timestamp, NULL));
++              "from", G_TYPE_UINT64, self->skip_from_timestamp,
++              "to", G_TYPE_UINT64, self->skip_to_timestamp, NULL));
+       self->skipped_last = 0;
+     }
+ 
+-- 
+GitLab
+
+
+From deba8ab4d39eea8d917d66bf3ebf672cd09d3868 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Sun, 25 Oct 2020 13:33:21 +0200
+Subject: [PATCH 5/5] decklink: Remove \n from debug output
+
+---
+ sys/decklink/gstdecklink.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.cpp b/sys/decklink/gstdecklink.cpp
+index f199c2ecb5..932ffde79e 100644
+--- a/sys/decklink/gstdecklink.cpp
++++ b/sys/decklink/gstdecklink.cpp
+@@ -1855,14 +1855,14 @@ gst_decklink_configure_profile (Device * device,
+     manager->Release ();
+ 
+     if (res == S_OK) {
+-      GST_DEBUG ("Successfully set profile.\n");
++      GST_DEBUG ("Successfully set profile");
+       return PROFILE_SET_SUCCESS;
+     } else {
+-      GST_ERROR ("Failed to set profile.\n");
++      GST_ERROR ("Failed to set profile");
+       return PROFILE_SET_FAILURE;
+     }
+   } else {
+-    GST_DEBUG ("Device has only one profile.\n");
++    GST_DEBUG ("Device has only one profile");
+     return PROFILE_SET_UNSUPPORTED;
+   }
+ }
+-- 
+GitLab
+

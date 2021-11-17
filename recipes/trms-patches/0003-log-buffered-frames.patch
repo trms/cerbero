@@ -1,0 +1,38 @@
+From 0962b32aabecbd2c2c5db516774b6d12342d1a06 Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Fri, 19 Mar 2021 16:03:43 -0400
+Subject: [PATCH 3/3] log buffered frames
+
+---
+ sys/decklink/gstdecklinkvideosink.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 6cfba937f..849eb1f3d 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -188,6 +188,7 @@ public:
+   {
+     BMDTimeValue completion_time;
+     HRESULT ret;
++    guint32 buffered_frames;
+ 
+     if ((ret = m_sink->output->output->GetFrameCompletionReferenceTimestamp (
+           completedFrame, GST_SECOND, &completion_time) != S_OK)) {
+@@ -196,6 +197,13 @@ public:
+       return ret;
+     }
+ 
++    if (m_sink->output->output->GetBufferedVideoFrameCount (&buffered_frames) != S_OK)
++      buffered_frames = 0;
++
++      GST_DEBUG_OBJECT (m_sink,
++        "Buffered %u frames in the driver",
++        buffered_frames);
++
+     switch (result) {
+       case bmdOutputFrameCompleted:
+         GST_LOG_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
+-- 
+2.20.1.windows.1
+

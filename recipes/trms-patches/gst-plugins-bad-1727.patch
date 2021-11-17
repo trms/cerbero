@@ -1,0 +1,28 @@
+From e7fb0249eddaacfe4b1c0f1ea0d8681f7cf5d959 Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Wed, 28 Oct 2020 19:00:43 +0900
+Subject: [PATCH] rtmp2src: Set buffer timestamp on output buffer
+
+This timestamp information would be useful for queue2 element
+when calculating time level and also it makes buffering decision
+more reliable.
+---
+ gst/rtmp2/gstrtmp2src.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/gst/rtmp2/gstrtmp2src.c b/gst/rtmp2/gstrtmp2src.c
+index f5c356b11e..2df92e4e79 100644
+--- a/gst/rtmp2/gstrtmp2src.c
++++ b/gst/rtmp2/gstrtmp2src.c
+@@ -680,6 +680,8 @@ gst_rtmp2_src_create (GstBaseSrc * src, guint64 offset, guint size,
+     self->sent_header = TRUE;
+   }
+ 
++  GST_BUFFER_DTS (buffer) = self->last_ts;
++
+   *outbuf = buffer;
+ 
+   gst_buffer_unref (message);
+-- 
+GitLab
+

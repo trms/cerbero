@@ -8,6 +8,18 @@ class Recipe(custom.GStreamer):
     tarball_checksum = '5382f98a9af2c92e5c0ca4fcb3911025cafd9f89b3142b206eb7b92b812e0979'
     # Explicitly enable plugins that we provide dependencies for to ensure that
     # we error out if they weren't found.
+    patches=[
+    './trms-patches/0001-Revert-Update-to-11.2-SDK.patch',
+    './trms-patches/0002-WIP-decklink-sink.patch',
+    './trms-patches/0003-Remove-profile-id.patch',
+    './trms-patches/0004-WIP-avcombiner.patch',
+    './trms-patches/0005-add-duplex-mode-to-decklinksink.patch',
+    './trms-patches/gst-plugins-bad-1846.patch',
+    './trms-patches/gst-plugins-bad-2429.patch',
+    './trms-patches/0001-ccextractor-Add-force-expose-caption-pad-property.patch',
+    './trms-patches/0002-hls-Add-hlswebvttsink-element.patch',
+    './trms-patches/gst-plugins-bad-1.0-cccombiner-timeout.patch'
+    ]
     meson_options = {# enabled plugins
                      'assrender': 'enabled',
                      'bz2': 'enabled',

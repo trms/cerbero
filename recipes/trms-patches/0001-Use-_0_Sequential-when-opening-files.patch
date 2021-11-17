@@ -1,0 +1,25 @@
+From 71a01d7f0d882bad6425ba4e63982dfa5d37d931 Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Thu, 28 Jan 2021 16:43:34 -0500
+Subject: [PATCH] Use _0_Sequential when opening files
+
+---
+ plugins/elements/gstfilesrc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/plugins/elements/gstfilesrc.c b/plugins/elements/gstfilesrc.c
+index bcd58d8c6..fee23db76 100644
+--- a/plugins/elements/gstfilesrc.c
++++ b/plugins/elements/gstfilesrc.c
+@@ -490,7 +490,7 @@ gst_file_src_start (GstBaseSrc * basesrc)
+   GST_INFO_OBJECT (src, "opening file %s", src->filename);
+ 
+   /* open the file */
+-  src->fd = gst_open (src->filename, O_RDONLY | O_BINARY, 0);
++  src->fd = gst_open (src->filename, O_RDONLY | O_BINARY | _O_SEQUENTIAL, 0);
+ 
+   if (src->fd < 0)
+     goto open_failed;
+-- 
+2.20.1.windows.1
+

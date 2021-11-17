@@ -1,0 +1,25 @@
+From fb1f70ebb3e07fc7bc52d031ed19b2ae72cf6035 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Wed, 2 Sep 2020 17:01:35 +0300
+Subject: [PATCH 1/2] filesrc: Remove unused #define on Windows
+
+---
+ plugins/elements/gstfilesrc.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/plugins/elements/gstfilesrc.c b/plugins/elements/gstfilesrc.c
+index d7888aeff..706ba0362 100644
+--- a/plugins/elements/gstfilesrc.c
++++ b/plugins/elements/gstfilesrc.c
+@@ -47,8 +47,6 @@
+ #include <io.h>                 /* lseek, open, close, read */
+ /* On win32, stat* default to 32 bit; we need the 64-bit
+  * variants, so explicitly define it that way. */
+-#undef stat
+-#define stat __stat64
+ #undef fstat
+ #define fstat _fstat64
+ #undef lseek
+-- 
+2.17.1
+

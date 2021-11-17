@@ -1,0 +1,402 @@
+From 29c1e2965c73c35b827cb7e52296fb7a9d37595a Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Tue, 15 Dec 2020 22:01:33 +0100
+Subject: [PATCH 1/3] line21dec: expose ntsc-only property
+
+When this is set, the element only tries to detect CC when the
+height is 525 or 486 (NTSC resolutions). The height is already
+checked.
+---
+ ext/closedcaption/gstline21dec.c | 73 ++++++++++++++++++++++++++++++++
+ ext/closedcaption/gstline21dec.h |  2 +
+ 2 files changed, 75 insertions(+)
+
+diff --git a/ext/closedcaption/gstline21dec.c b/ext/closedcaption/gstline21dec.c
+index 631be73d82..88a06ed273 100644
+--- a/ext/closedcaption/gstline21dec.c
++++ b/ext/closedcaption/gstline21dec.c
+@@ -37,6 +37,14 @@
+ GST_DEBUG_CATEGORY_STATIC (gst_line_21_decoder_debug);
+ #define GST_CAT_DEFAULT gst_line_21_decoder_debug
+ 
++enum
++{
++  PROP_0,
++  PROP_NTSC_ONLY,
++};
++
++#define DEFAULT_NTSC_ONLY FALSE
++
+ #define CAPS "video/x-raw, format={ I420, YUY2, YVYU, UYVY, VYUY, v210 }, interlace-mode=interleaved"
+ 
+ static GstStaticPadTemplate sinktemplate = GST_STATIC_PAD_TEMPLATE ("sink",
+@@ -64,6 +72,38 @@ static GstFlowReturn gst_line_21_decoder_transform_ip (GstVideoFilter * filter,
+ static GstFlowReturn gst_line_21_decoder_prepare_output_buffer (GstBaseTransform
+     * trans, GstBuffer * in, GstBuffer ** out);
+ 
++static void
++gst_line_21_decoder_set_property (GObject * object, guint prop_id,
++    const GValue * value, GParamSpec * pspec)
++{
++  GstLine21Decoder *enc = GST_LINE21DECODER (object);
++
++  switch (prop_id) {
++    case PROP_NTSC_ONLY:
++      enc->ntsc_only = g_value_get_boolean (value);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++  }
++}
++
++static void
++gst_line_21_decoder_get_property (GObject * object, guint prop_id,
++    GValue * value, GParamSpec * pspec)
++{
++  GstLine21Decoder *enc = GST_LINE21DECODER (object);
++
++  switch (prop_id) {
++    case PROP_NTSC_ONLY:
++      g_value_set_boolean (value, enc->ntsc_only);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++  }
++}
++
+ static void
+ gst_line_21_decoder_class_init (GstLine21DecoderClass * klass)
+ {
+@@ -78,6 +118,24 @@ gst_line_21_decoder_class_init (GstLine21DecoderClass * klass)
+   filter_class = (GstVideoFilterClass *) klass;
+ 
+   gobject_class->finalize = gst_line_21_decoder_finalize;
++  gobject_class->set_property = gst_line_21_decoder_set_property;
++  gobject_class->get_property = gst_line_21_decoder_get_property;
++
++  /**
++   * line21decoder:ntsc-only
++   *
++   * Whether line 21 decoding should only be attempted when the
++   * input resolution matches NTSC (720 x 525) or NTSC usable
++   * lines (720 x 486)
++   *
++   * Since: 1.20
++   */
++  g_object_class_install_property (G_OBJECT_CLASS (klass),
++      PROP_NTSC_ONLY, g_param_spec_boolean ("ntsc-only",
++          "NTSC only",
++          "Whether line 21 decoding should only be attempted when the "
++          "input resolution matches NTSC", DEFAULT_NTSC_ONLY,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
+   gst_element_class_set_static_metadata (gstelement_class,
+       "Line 21 CC Decoder",
+@@ -105,8 +163,10 @@ gst_line_21_decoder_init (GstLine21Decoder * filter)
+ {
+   GstLine21Decoder *self = (GstLine21Decoder *) filter;
+ 
++  self->info = NULL;
+   self->line21_offset = -1;
+   self->max_line_probes = 40;
++  self->ntsc_only = DEFAULT_NTSC_ONLY;
+ }
+ 
+ static vbi_pixfmt
+@@ -173,6 +233,15 @@ gst_line_21_decoder_set_info (GstVideoFilter * filter,
+     return TRUE;
+   }
+ 
++  if (self->ntsc_only &&
++      GST_VIDEO_INFO_HEIGHT (in_info) != 525 &&
++      GST_VIDEO_INFO_HEIGHT (in_info) != 486) {
++    GST_DEBUG_OBJECT (filter,
++        "NTSC-only, only 525 or 486 pixel high formats are supported");
++    self->compatible_format = FALSE;
++    return TRUE;
++  }
++
+   if (fmt == 0) {
+     if (GST_VIDEO_INFO_FORMAT (in_info) == GST_VIDEO_FORMAT_v210) {
+       GST_DEBUG_OBJECT (filter,
+@@ -428,6 +497,10 @@ gst_line_21_decoder_stop (GstBaseTransform * btrans)
+   GstLine21Decoder *self = (GstLine21Decoder *) btrans;
+ 
+   vbi_raw_decoder_destroy (&self->zvbi_decoder);
++  if (self->info) {
++    gst_video_info_free (self->info);
++    self->info = NULL;
++  }
+ 
+   return TRUE;
+ }
+diff --git a/ext/closedcaption/gstline21dec.h b/ext/closedcaption/gstline21dec.h
+index e576f25fe5..c0134b304e 100644
+--- a/ext/closedcaption/gstline21dec.h
++++ b/ext/closedcaption/gstline21dec.h
+@@ -60,6 +60,8 @@ struct _GstLine21Decoder
+   guint8 *converted_lines;
+   
+   GstVideoInfo *info;
++
++  gboolean ntsc_only;
+ };
+ 
+ struct _GstLine21DecoderClass
+-- 
+GitLab
+
+
+From 6b1166a7c1d98a57204ac4503ade9873e1e83526 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Wed, 16 Dec 2020 01:02:53 +0100
+Subject: [PATCH 2/3] line21dec: expose mode property
+
+That new property can be used to control whether and how
+detected CC meta should be inserted in the list of existing
+CC meta on the input frame (if there was any).
+---
+ ext/closedcaption/gstline21dec.c | 84 +++++++++++++++++++++++++++++++-
+ ext/closedcaption/gstline21dec.h |  7 +++
+ 2 files changed, 90 insertions(+), 1 deletion(-)
+
+diff --git a/ext/closedcaption/gstline21dec.c b/ext/closedcaption/gstline21dec.c
+index 88a06ed273..489bd00982 100644
+--- a/ext/closedcaption/gstline21dec.c
++++ b/ext/closedcaption/gstline21dec.c
+@@ -37,13 +37,24 @@
+ GST_DEBUG_CATEGORY_STATIC (gst_line_21_decoder_debug);
+ #define GST_CAT_DEFAULT gst_line_21_decoder_debug
+ 
++/**
++ * GstLine21DecoderMode:
++ * @GST_LINE_21_DECODER_MODE_ADD: add new CC meta on top of other CC meta, if any
++ * @GST_LINE_21_DECODER_MODE_DROP: ignore CC if a CC meta was already present
++ * @GST_LINE_21_DECODER_MODE_REPLACE: replace existing CC meta
++ *
++ * Since: 1.20
++ */
++
+ enum
+ {
+   PROP_0,
+   PROP_NTSC_ONLY,
++  PROP_MODE,
+ };
+ 
+ #define DEFAULT_NTSC_ONLY FALSE
++#define DEFAULT_MODE GST_LINE_21_DECODER_MODE_ADD
+ 
+ #define CAPS "video/x-raw, format={ I420, YUY2, YVYU, UYVY, VYUY, v210 }, interlace-mode=interleaved"
+ 
+@@ -62,6 +73,33 @@ G_DEFINE_TYPE (GstLine21Decoder, gst_line_21_decoder, GST_TYPE_VIDEO_FILTER);
+ GST_ELEMENT_REGISTER_DEFINE (line21decoder, "line21decoder",
+     GST_RANK_NONE, GST_TYPE_LINE21DECODER);
+ 
++#define GST_TYPE_LINE_21_DECODER_MODE (gst_line_21_decoder_mode_get_type())
++static GType
++gst_line_21_decoder_mode_get_type (void)
++{
++  static const GEnumValue values[] = {
++    {GST_LINE_21_DECODER_MODE_ADD,
++        "add new CC meta on top of other CC meta, if any", "add"},
++    {GST_LINE_21_DECODER_MODE_DROP,
++          "ignore CC if a CC meta was already present",
++        "drop"},
++    {GST_LINE_21_DECODER_MODE_REPLACE,
++        "replace existing CC meta", "replace"},
++    {0, NULL, NULL}
++  };
++  static volatile GType id = 0;
++
++  if (g_once_init_enter ((gsize *) & id)) {
++    GType _id;
++
++    _id = g_enum_register_static ("GstLine21DecoderMode", values);
++
++    g_once_init_leave ((gsize *) & id, _id);
++  }
++
++  return id;
++}
++
+ static void gst_line_21_decoder_finalize (GObject * self);
+ static gboolean gst_line_21_decoder_stop (GstBaseTransform * btrans);
+ static gboolean gst_line_21_decoder_set_info (GstVideoFilter * filter,
+@@ -79,6 +117,9 @@ gst_line_21_decoder_set_property (GObject * object, guint prop_id,
+   GstLine21Decoder *enc = GST_LINE21DECODER (object);
+ 
+   switch (prop_id) {
++    case PROP_MODE:
++      enc->mode = g_value_get_enum (value);
++      break;
+     case PROP_NTSC_ONLY:
+       enc->ntsc_only = g_value_get_boolean (value);
+       break;
+@@ -95,6 +136,9 @@ gst_line_21_decoder_get_property (GObject * object, guint prop_id,
+   GstLine21Decoder *enc = GST_LINE21DECODER (object);
+ 
+   switch (prop_id) {
++    case PROP_MODE:
++      g_value_set_enum (value, enc->mode);
++      break;
+     case PROP_NTSC_ONLY:
+       g_value_set_boolean (value, enc->ntsc_only);
+       break;
+@@ -137,6 +181,22 @@ gst_line_21_decoder_class_init (GstLine21DecoderClass * klass)
+           "input resolution matches NTSC", DEFAULT_NTSC_ONLY,
+           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
++  /**
++   * GstLine21Decoder:mode
++   *
++   * Control whether and how detected CC meta should be inserted
++   * in the list of existing CC meta on a frame (if any).
++   *
++   * Since: 1.20
++   */
++  g_object_class_install_property (G_OBJECT_CLASS (klass),
++      PROP_MODE, g_param_spec_enum ("mode",
++          "Mode",
++          "Control whether and how detected CC meta should be inserted "
++          "in the list of existing CC meta on a frame (if any).",
++          GST_TYPE_LINE_21_DECODER_MODE, DEFAULT_MODE,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++
+   gst_element_class_set_static_metadata (gstelement_class,
+       "Line 21 CC Decoder",
+       "Filter/Video/ClosedCaption",
+@@ -167,6 +227,7 @@ gst_line_21_decoder_init (GstLine21Decoder * filter)
+   self->line21_offset = -1;
+   self->max_line_probes = 40;
+   self->ntsc_only = DEFAULT_NTSC_ONLY;
++  self->mode = DEFAULT_MODE;
+ }
+ 
+ static vbi_pixfmt
+@@ -404,6 +465,15 @@ get_video_data (GstLine21Decoder * self, GstVideoFrame * frame, gint line)
+   return self->converted_lines;
+ }
+ 
++static gboolean
++drop_cc_meta (GstBuffer * buffer, GstMeta ** meta, gpointer unused)
++{
++  if ((*meta)->info->api == GST_VIDEO_CAPTION_META_API_TYPE)
++    *meta = NULL;
++
++  return TRUE;
++}
++
+ /* Call this to scan for CC
+  * Returns TRUE if it was found and set, else FALSE */
+ static gboolean
+@@ -414,6 +484,13 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
+   gboolean found = FALSE;
+   guint8 *data;
+ 
++  if (self->mode == GST_LINE_21_DECODER_MODE_DROP &&
++      gst_buffer_get_n_meta (frame->buffer,
++          GST_VIDEO_CAPTION_META_API_TYPE) > 0) {
++    GST_DEBUG_OBJECT (self, "Mode drop and buffer had CC meta, ignoring");
++    return FALSE;
++  }
++
+   GST_DEBUG_OBJECT (self, "Starting probing. max_line_probes:%d",
+       self->max_line_probes);
+ 
+@@ -443,7 +520,6 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
+   }
+ 
+   if (!found) {
+-    GST_DEBUG_OBJECT (self, "No CC found");
+     self->line21_offset = -1;
+   } else {
+     guint base_line1 = 0, base_line2 = 0;
+@@ -457,6 +533,12 @@ gst_line_21_decoder_scan (GstLine21Decoder * self, GstVideoFrame * frame)
+       base_line2 = 318;
+     }
+ 
++    if (self->mode == GST_LINE_21_DECODER_MODE_REPLACE) {
++      GST_DEBUG_OBJECT (self,
++          "Mode replace and new CC meta, removing existing CC meta");
++      gst_buffer_foreach_meta (frame->buffer, drop_cc_meta, NULL);
++    }
++
+     ccdata[0] |= (base_line1 < i ? i - base_line1 : 0) & 0x1f;
+     ccdata[1] = sliced[0].data[0];
+     ccdata[2] = sliced[0].data[1];
+diff --git a/ext/closedcaption/gstline21dec.h b/ext/closedcaption/gstline21dec.h
+index c0134b304e..edf1408569 100644
+--- a/ext/closedcaption/gstline21dec.h
++++ b/ext/closedcaption/gstline21dec.h
+@@ -41,6 +41,12 @@ G_BEGIN_DECLS
+ typedef struct _GstLine21Decoder GstLine21Decoder;
+ typedef struct _GstLine21DecoderClass GstLine21DecoderClass;
+ 
++typedef enum {
++  GST_LINE_21_DECODER_MODE_ADD,
++  GST_LINE_21_DECODER_MODE_DROP,
++  GST_LINE_21_DECODER_MODE_REPLACE,
++} GstLine21DecoderMode;
++
+ struct _GstLine21Decoder
+ {
+   GstVideoFilter parent;
+@@ -62,6 +68,7 @@ struct _GstLine21Decoder
+   GstVideoInfo *info;
+ 
+   gboolean ntsc_only;
++  GstLine21DecoderMode mode;
+ };
+ 
+ struct _GstLine21DecoderClass
+-- 
+GitLab
+
+
+From 70ae556b315402fac47dda2170da6ee8de668549 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Fri, 22 Jan 2021 23:54:50 +0100
+Subject: [PATCH 3/3] line21dec: relax caps requirements
+
+Instead of requiring interlaced video, simply skip CC detection
+when the input is progressive.
+
+This allows placing line21decoder unconditionally in pipelines,
+without having to worry about whether the input stream will be
+interlaced, or even worse interlacing just in case!
+---
+ ext/closedcaption/gstline21dec.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/ext/closedcaption/gstline21dec.c b/ext/closedcaption/gstline21dec.c
+index 489bd00982..a5d33f8d3b 100644
+--- a/ext/closedcaption/gstline21dec.c
++++ b/ext/closedcaption/gstline21dec.c
+@@ -56,7 +56,7 @@ enum
+ #define DEFAULT_NTSC_ONLY FALSE
+ #define DEFAULT_MODE GST_LINE_21_DECODER_MODE_ADD
+ 
+-#define CAPS "video/x-raw, format={ I420, YUY2, YVYU, UYVY, VYUY, v210 }, interlace-mode=interleaved"
++#define CAPS "video/x-raw, format={ I420, YUY2, YVYU, UYVY, VYUY, v210 }"
+ 
+ static GstStaticPadTemplate sinktemplate = GST_STATIC_PAD_TEMPLATE ("sink",
+     GST_PAD_SINK,
+@@ -288,6 +288,12 @@ gst_line_21_decoder_set_info (GstVideoFilter * filter,
+   /* Scan the next frame from the first line */
+   self->line21_offset = -1;
+ 
++  if (!GST_VIDEO_INFO_IS_INTERLACED (in_info)) {
++    GST_DEBUG_OBJECT (filter, "Only interlaced formats are supported");
++    self->compatible_format = FALSE;
++    return TRUE;
++  }
++
+   if (GST_VIDEO_INFO_WIDTH (in_info) != 720) {
+     GST_DEBUG_OBJECT (filter, "Only 720 pixel wide formats are supported");
+     self->compatible_format = FALSE;
+-- 
+GitLab
+

@@ -1,0 +1,28 @@
+From b7fe5a324d88ea360685b9ab425628618a106d1c Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Fri, 25 Sep 2020 21:06:44 +0900
+Subject: [PATCH] glupload: Fix for wrongly recognized reconfigure condition
+
+gst_gl_upload_transform_caps() method might return non-fixed
+caps (texture-target for example) but priv->out_caps is fixed one
+so the former (non-fixed caps) is superset.
+---
+ gst-libs/gst/gl/gstglupload.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gst-libs/gst/gl/gstglupload.c b/gst-libs/gst/gl/gstglupload.c
+index 71e706896..f5775f438 100644
+--- a/gst-libs/gst/gl/gstglupload.c
++++ b/gst-libs/gst/gl/gstglupload.c
+@@ -2072,7 +2072,7 @@ restart:
+     if (last_impl != upload->priv->method_impl) {
+       GstCaps *caps = gst_gl_upload_transform_caps (upload, upload->context,
+           GST_PAD_SINK, upload->priv->in_caps, NULL);
+-      if (!gst_caps_is_subset (caps, upload->priv->out_caps)) {
++      if (!gst_caps_is_subset (upload->priv->out_caps, caps)) {
+         gst_buffer_replace (&outbuf, NULL);
+         ret = GST_GL_UPLOAD_RECONFIGURE;
+       }
+-- 
+GitLab
+

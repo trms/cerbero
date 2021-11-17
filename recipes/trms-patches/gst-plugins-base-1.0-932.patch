@@ -1,0 +1,49 @@
+From 5a1bce215a8f3fb1e8f70c9bd71de3fff6850b5a Mon Sep 17 00:00:00 2001
+From: Edward Hervey <edward@centricular.com>
+Date: Thu, 19 Nov 2020 10:49:01 +0100
+Subject: [PATCH] decodebin3: Make input activation "atomic"
+
+When adding inputs dynamically, we need to make sure the new parsebin are
+added *and* activated by the same thread (by taking the state change lock).
+
+The rationale for this is that the calling thread might be an upstream streaming
+thread and when activating parsebin it might call back upstream. If we don't use
+the same thread (ex: when the application does a state change on decodebin3
+between the moment we add parsebin to decodebin3 and we synchronize the state of
+parsebin) then we would end up in different threads trying to take upstream
+recursive locks.
+---
+ gst/playback/gstdecodebin3.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/gst/playback/gstdecodebin3.c b/gst/playback/gstdecodebin3.c
+index 968a6347f..999de4467 100644
+--- a/gst/playback/gstdecodebin3.c
++++ b/gst/playback/gstdecodebin3.c
+@@ -799,14 +799,22 @@ ensure_input_parsebin (GstDecodebin3 * dbin, DecodebinInput * input)
+   }
+ 
+   if (GST_OBJECT_PARENT (GST_OBJECT (input->parsebin)) != GST_OBJECT (dbin)) {
++    /* The state lock is taken so that we ensure we are the one (de)activating
++     * parsebin. We need to do this to ensure any activation taking place in
++     * parsebin (including by elements doing upstream activation) are done
++     * within the same thread. */
++    GST_STATE_LOCK (input->parsebin);
+     gst_bin_add (GST_BIN (dbin), input->parsebin);
+     set_state = TRUE;
+   }
+ 
+   gst_ghost_pad_set_target (GST_GHOST_PAD (input->ghost_sink),
+       input->parsebin_sink);
+-  if (set_state)
++
++  if (set_state) {
+     gst_element_sync_state_with_parent (input->parsebin);
++    GST_STATE_UNLOCK (input->parsebin);
++  }
+ 
+   return TRUE;
+ 
+-- 
+GitLab
+

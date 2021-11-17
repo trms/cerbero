@@ -1,0 +1,157 @@
+From 1c2707e68719fc17701fc071320e1ce66ff1e08a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Fri, 23 Apr 2021 18:05:06 +0300
+Subject: [PATCH 4/4] decklinkvideosrc: Automatically detect widescreen vs.
+ normal NTSC/PAL
+
+Based on the AFD aspect ratio flag the source can detect (in mode=auto)
+whether this NTSC/PAL mode is actually a normal or a widescreen one and
+select the caps according to that.
+---
+ sys/decklink/gstdecklinkvideosrc.cpp | 75 ++++++++++++++++++++--------
+ sys/decklink/gstdecklinkvideosrc.h   |  1 +
+ 2 files changed, 54 insertions(+), 22 deletions(-)
+
+diff --git a/sys/decklink/gstdecklinkvideosrc.cpp b/sys/decklink/gstdecklinkvideosrc.cpp
+index 4106d68e6..90cb4f112 100644
+--- a/sys/decklink/gstdecklinkvideosrc.cpp
++++ b/sys/decklink/gstdecklinkvideosrc.cpp
+@@ -649,6 +649,8 @@ gst_decklink_video_src_start (GstDecklinkVideoSrc * self)
+     self->input->start_streams (self->input->videosrc);
+   g_mutex_unlock (&self->input->lock);
+ 
++  self->aspect_ratio_flag = -1;
++
+   return TRUE;
+ }
+ 
+@@ -979,11 +981,13 @@ extract_vbi_line (GstDecklinkVideoSrc * self, GstBuffer ** buffer,
+             "Adding AFD/Bar meta to buffer for line %u", field2_offset + line);
+         GST_MEMDUMP_OBJECT (self, "AFD/Bar", gstanc.data, gstanc.data_count);
+ 
+-        if (gstanc.data_count < 16) {
++        if (gstanc.data_count < 8) {
+           GST_WARNING_OBJECT (self, "AFD/Bar data too small");
+           continue;
+         }
+ 
++        self->aspect_ratio_flag = (gstanc.data[0] >> 2) & 0x1;
++
+         afd = (GstVideoAFDValue) ((gstanc.data[0] >> 3) & 0xf);
+         is_letterbox = ((gstanc.data[3] >> 4) & 0x3) == 0;
+         bar1 = GST_READ_UINT16_BE (&gstanc.data[4]);
+@@ -1216,9 +1220,55 @@ retry:
+   // If we're not flushing, we should have a valid frame from the queue
+   g_assert (f.frame != NULL);
+ 
++  // Create output buffer
++  f.frame->GetBytes ((gpointer *) & data);
++  data_size = f.frame->GetRowBytes()*f.frame->GetHeight(); //self->info.size;
++
++  vf = (VideoFrame *) g_malloc0 (sizeof (VideoFrame));
++
++  *buffer =
++      gst_buffer_new_wrapped_full ((GstMemoryFlags) GST_MEMORY_FLAG_READONLY,
++      (gpointer) data, data_size, 0, data_size, vf,
++      (GDestroyNotify) video_frame_free);
++
++  vf->frame = f.frame;
++  f.frame->AddRef ();
++  vf->input = self->input->input;
++  vf->input->AddRef ();
++
++  // If we have a format that supports VANC and we are asked to extract CC,
++  // then do it here.
++  if ((self->output_cc || self->output_afd_bar)
++      && self->signal_state != SIGNAL_STATE_LOST)
++    extract_vbi (self, buffer, vf);
++
+   if (!gst_pad_has_current_caps (GST_BASE_SRC_PAD (self))) {
+     caps_changed = TRUE;
+   }
++  // If there was AFD information with the aspect ratio flag set and the mode
++  // is auto then we have to switch from normal NTSC/PAL to the widescreen
++  // variants
++  if (self->aspect_ratio_flag == 1 && self->mode == GST_DECKLINK_MODE_AUTO) {
++    switch (f.mode) {
++      case GST_DECKLINK_MODE_NTSC:
++        f.mode = GST_DECKLINK_MODE_NTSC_WIDESCREEN;
++        break;
++      case GST_DECKLINK_MODE_NTSC_P:
++        f.mode = GST_DECKLINK_MODE_NTSC_P_WIDESCREEN;
++        break;
++      case GST_DECKLINK_MODE_NTSC2398:
++        f.mode = GST_DECKLINK_MODE_NTSC2398_WIDESCREEN;
++        break;
++      case GST_DECKLINK_MODE_PAL:
++        f.mode = GST_DECKLINK_MODE_PAL_WIDESCREEN;
++        break;
++      case GST_DECKLINK_MODE_PAL_P:
++        f.mode = GST_DECKLINK_MODE_PAL_P_WIDESCREEN;
++        break;
++      default:
++        break;
++    }
++  }
+ 
+   if (self->caps_mode != f.mode) {
+     if (self->mode == GST_DECKLINK_MODE_AUTO
+@@ -1233,6 +1283,7 @@ retry:
+           ("Invalid mode in captured frame"),
+           ("Mode set to %d but captured %d", self->caps_mode, f.mode));
+       capture_frame_clear (&f);
++      gst_clear_buffer (buffer);
+       return GST_FLOW_NOT_NEGOTIATED;
+     }
+   }
+@@ -1249,6 +1300,7 @@ retry:
+           ("Invalid pixel format in captured frame"),
+           ("Format set to %d but captured %d", self->caps_format, f.format));
+       capture_frame_clear (&f);
++      gst_clear_buffer (buffer);
+       return GST_FLOW_NOT_NEGOTIATED;
+     }
+   }
+@@ -1298,27 +1350,6 @@ retry:
+     }
+   }
+ 
+-  f.frame->GetBytes ((gpointer *) & data);
+-  data_size = self->info.size;
+-
+-  vf = (VideoFrame *) g_malloc0 (sizeof (VideoFrame));
+-
+-  *buffer =
+-      gst_buffer_new_wrapped_full ((GstMemoryFlags) GST_MEMORY_FLAG_READONLY,
+-      (gpointer) data, data_size, 0, data_size, vf,
+-      (GDestroyNotify) video_frame_free);
+-
+-  vf->frame = f.frame;
+-  f.frame->AddRef ();
+-  vf->input = self->input->input;
+-  vf->input->AddRef ();
+-
+-  // If we have a format that supports VANC and we are asked to extract CC,
+-  // then do it here.
+-  if ((self->output_cc || self->output_afd_bar)
+-      && self->signal_state != SIGNAL_STATE_LOST)
+-    extract_vbi (self, buffer, vf);
+-
+   if (f.no_signal)
+     GST_BUFFER_FLAG_SET (*buffer, GST_BUFFER_FLAG_GAP);
+   GST_BUFFER_TIMESTAMP (*buffer) = f.timestamp;
+diff --git a/sys/decklink/gstdecklinkvideosrc.h b/sys/decklink/gstdecklinkvideosrc.h
+index 837bf4318..bdec61a3d 100644
+--- a/sys/decklink/gstdecklinkvideosrc.h
++++ b/sys/decklink/gstdecklinkvideosrc.h
+@@ -58,6 +58,7 @@ struct _GstDecklinkVideoSrc
+ 
+   GstDecklinkModeEnum mode;
+   GstDecklinkModeEnum caps_mode;
++  gint aspect_ratio_flag; /* -1 when unknown, 0 not set, 1 set */
+   BMDPixelFormat caps_format;
+   GstDecklinkConnectionEnum connection;
+   gint device_number;
+-- 
+2.20.1.windows.1
+

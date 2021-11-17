@@ -1,0 +1,26 @@
+From 64190e745298e0144b3683c2a227a13b2009c539 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Thu, 8 Jul 2021 02:24:18 +0200
+Subject: [PATCH] cccombiner: mark field 0 as valid when generating padding CDP
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/merge_requests/2383>
+---
+ ext/closedcaption/gstcccombiner.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ext/closedcaption/gstcccombiner.c b/ext/closedcaption/gstcccombiner.c
+index 1c2f03220b..aef5e6c366 100644
+--- a/ext/closedcaption/gstcccombiner.c
++++ b/ext/closedcaption/gstcccombiner.c
+@@ -331,7 +331,7 @@ make_padding (GstCCCombiner * self, const GstVideoTimeCode * tc, guint field)
+   switch (self->caption_type) {
+     case GST_VIDEO_CAPTION_TYPE_CEA708_CDP:
+     {
+-      const guint8 cc_data[6] = { 0xf8, 0x80, 0x80, 0xf9, 0x80, 0x80 };
++      const guint8 cc_data[6] = { 0xfc, 0x80, 0x80, 0xf9, 0x80, 0x80 };
+ 
+       ret = make_cdp (self, cc_data, 6, self->cdp_fps_entry, tc);
+       break;
+-- 
+GitLab
+

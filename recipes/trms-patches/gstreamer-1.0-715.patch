@@ -1,0 +1,155 @@
+From ff08f5e7903efea2cce520f4db0ae4e1a0e550d9 Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Sat, 5 Dec 2020 07:23:07 +0900
+Subject: [PATCH] systemclock: Use high resolution timer on Windows if possible
+
+Default Windows' system timer has poor resolution (less than about 16ms)
+which is not suitable for media processing.
+To use high-resolution timer on Windows, we need to make use of timeBeginPeriod() API
+
+NOTE: timeBeginPeriod() will change global system setting, that means
+other applications on the system will be affected. If user doesn't
+want to change global system setting, "GST_DISABLE_WINMM_CLOCK_TIMER"
+environment can be used for the purpose.
+
+NOTE: After the use of updated system clock precision, we will
+restore the previous setting by using timeEndPeriod()
+---
+ gst/gstsystemclock.c | 68 ++++++++++++++++++++++++++++++++++++++++++++
+ meson.build          |  6 ++++
+ 2 files changed, 74 insertions(+)
+
+diff --git a/gst/gstsystemclock.c b/gst/gstsystemclock.c
+index 61d4d513bb..a7d5c44ea1 100644
+--- a/gst/gstsystemclock.c
++++ b/gst/gstsystemclock.c
+@@ -54,6 +54,9 @@
+ #  ifndef EWOULDBLOCK
+ #  define EWOULDBLOCK EAGAIN    /* This is just to placate gcc */
+ #  endif
++#  ifdef HAVE_WINMM
++#  include <timeapi.h>
++#  endif
+ #endif /* G_OS_WIN32 */
+ 
+ #ifdef __APPLE__
+@@ -352,6 +355,10 @@ struct _GstSystemClockPrivate
+ 
+ #ifdef G_OS_WIN32
+   LARGE_INTEGER frequency;
++# ifdef HAVE_WINMM
++  guint time_resolution;
++  gboolean need_end_period;
++# endif
+ #endif                          /* G_OS_WIN32 */
+ #ifdef __APPLE__
+   struct mach_timebase_info mach_timebase;
+@@ -380,6 +387,7 @@ static GstClock *_the_system_clock = NULL;
+ static gboolean _external_default_clock = FALSE;
+ 
+ static void gst_system_clock_dispose (GObject * object);
++static void gst_system_clock_finalize (GObject * object);
+ static void gst_system_clock_set_property (GObject * object, guint prop_id,
+     const GValue * value, GParamSpec * pspec);
+ static void gst_system_clock_get_property (GObject * object, guint prop_id,
+@@ -416,6 +424,7 @@ gst_system_clock_class_init (GstSystemClockClass * klass)
+   gstclock_class = (GstClockClass *) klass;
+ 
+   gobject_class->dispose = gst_system_clock_dispose;
++  gobject_class->finalize = gst_system_clock_finalize;
+   gobject_class->set_property = gst_system_clock_set_property;
+   gobject_class->get_property = gst_system_clock_get_property;
+ 
+@@ -452,6 +461,50 @@ gst_system_clock_init (GstSystemClock * clock)
+ 
+ #ifdef G_OS_WIN32
+   QueryPerformanceFrequency (&priv->frequency);
++# ifdef HAVE_WINMM
++  {
++    TIMECAPS time_caps;
++    const gchar *env = g_getenv ("GST_DISABLE_WINMM_CLOCK_TIMER");
++    /* NOTE: Default precision of Windows timer would be varying
++     * depending on system (usually less than 16ms)
++     * But we can use more precise timer resolution by using timeBeginPeriod()
++     * if system supports it.
++     *
++     * Note that this precision change will affect global state
++     * (i.e., it will affect all applications on the system).
++     * As a result, it might have negative effect on some cases
++     * such as power-saving mode.
++     * To avoid such change, user can disable this clock precision update by
++     * using environment variable.
++     */
++    if (!env) {
++      if (timeGetDevCaps (&time_caps, sizeof (TIMECAPS)) != TIMERR_NOERROR) {
++        /* Couldn't get capability, but let's ignore it */
++      } else {
++        guint resolution;
++        MMRESULT ret;
++
++        resolution = MIN (MAX (time_caps.wPeriodMin, 1), time_caps.wPeriodMax);
++        /* timeBeginPeriod() allowed to be called multiple-time in a process
++         * if it's paired with timeEndPeriod() */
++        ret = timeBeginPeriod (resolution);
++
++        if (ret != TIMERR_NOERROR) {
++          GST_CAT_WARNING (GST_CAT_CLOCK,
++              "Couldn't update timer period with %dms, ret: %d",
++              resolution, ret);
++        } else {
++          GST_CAT_INFO (GST_CAT_CLOCK,
++              "Clock precision is updated to %dms, "
++              "caps (min-period: %dms, max-period: %dms)",
++              resolution, time_caps.wPeriodMin, time_caps.wPeriodMax);
++          priv->time_resolution = resolution;
++          priv->need_end_period = TRUE;
++        }
++      }
++    }
++  }
++# endif /* HAVE_WINMM */
+ #endif /* G_OS_WIN32 */
+ 
+ #ifdef __APPLE__
+@@ -526,6 +579,21 @@ gst_system_clock_dispose (GObject * object)
+   }
+ }
+ 
++static void
++gst_system_clock_finalize (GObject * object)
++{
++#ifdef HAVE_WINMM
++  GstClock *clock = (GstClock *) object;
++  GstSystemClock *sysclock = GST_SYSTEM_CLOCK_CAST (clock);
++  GstSystemClockPrivate *priv = sysclock->priv;
++
++  if (priv->need_end_period)
++    timeEndPeriod (priv->time_resolution);
++#endif
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
+ static void
+ gst_system_clock_set_property (GObject * object, guint prop_id,
+     const GValue * value, GParamSpec * pspec)
+diff --git a/meson.build b/meson.build
+index 1a860c356c..b3f683fcf0 100644
+--- a/meson.build
++++ b/meson.build
+@@ -384,6 +384,12 @@ if host_system == 'windows'
+   if cc.compiles(code, name : 'building for UWP')
+     building_for_uwp = true
+   endif
++
++  # Windows Multimedia timer is desktop-only API
++  if not building_for_uwp
++    platform_deps += [cc.find_library('winmm')]
++    cdata.set('HAVE_WINMM', 1)
++  endif
+ endif
+ 
+ backtrace_deps = []
+-- 
+GitLab
+

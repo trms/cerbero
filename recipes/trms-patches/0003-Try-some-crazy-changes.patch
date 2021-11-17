@@ -1,0 +1,176 @@
+From f161206b37a31d3451950607aa3502eb2fa081fb Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Sun, 6 Dec 2020 19:09:47 -0500
+Subject: [PATCH 3/3] Try some crazy changes
+
+---
+ sys/decklink/gstdecklink.h            |  4 +-
+ sys/decklink/gstdecklinkvideosink.cpp | 96 +++++++++++++++++++--------
+ 2 files changed, 72 insertions(+), 28 deletions(-)
+
+diff --git a/sys/decklink/gstdecklink.h b/sys/decklink/gstdecklink.h
+index 97522c6c7..153d2edba 100644
+--- a/sys/decklink/gstdecklink.h
++++ b/sys/decklink/gstdecklink.h
+@@ -239,7 +239,7 @@ struct _GstDecklinkOutput {
+   gchar *hw_serial_number;
+ 
+   GstClock *clock;
+-  GstClockTime clock_start_time, clock_last_time, clock_epoch;
++  GstClockTime clock_start_time, clock_last_time, clock_epoch, first_scheduled_frame;
+   GstClockTimeDiff clock_offset;
+   gboolean started;
+   gboolean clock_restart;
+@@ -257,6 +257,8 @@ struct _GstDecklinkOutput {
+   GstElement *videosink;
+   gboolean video_enabled;
+   void (*start_scheduled_playback) (GstElement *videosink);
++
++  guint64 frame_count;
+ };
+ 
+ typedef struct _GstDecklinkInput GstDecklinkInput;
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 6cfba937f..a21a843c6 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -206,7 +206,7 @@ public:
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDropped:
+-        GST_INFO_OBJECT (m_sink, "Dropped frame %p for %" GST_TIME_FORMAT,
++        GST_ERROR_OBJECT (m_sink, "Dropped frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameFlushed:
+@@ -802,9 +802,13 @@ gst_decklink_video_sink_convert_to_internal_clock (GstDecklinkVideoSink * self,
+   }
+ 
+   if (external_base != GST_CLOCK_TIME_NONE &&
+-      internal_base != GST_CLOCK_TIME_NONE)
+-    *timestamp += internal_offset;
+-  else
++      internal_base != GST_CLOCK_TIME_NONE) {
++    
++    GST_LOG_OBJECT (self, "forcing timestamp to internal time.");
++    //*timestamp += internal_offset;
++    *timestamp = gst_clock_get_internal_time (self->output->clock);
++  } else
++    GST_LOG_OBJECT (self, "setting timestampe equal to internal clock time");
+     *timestamp = gst_clock_get_internal_time (self->output->clock);
+ 
+   GST_DEBUG_OBJECT (self, "Output timestamp %" GST_TIME_FORMAT
+@@ -1276,6 +1280,9 @@ gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
+   else
+     running_time = 0;
+ 
++  gst_decklink_video_sink_convert_to_internal_clock (self, &running_time,
++      &running_time_duration);  
++
+   ret = self->output->output->CreateVideoFrame (self->info.width,
+       self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
+       &frame);
+@@ -1334,22 +1341,57 @@ gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
+ 
+   write_vbi (self, buffer, format, frame, tc_meta);
+ 
+-  gst_decklink_video_sink_convert_to_internal_clock (self, &running_time,
+-      &running_time_duration);
+ 
+-  GST_LOG_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
++
++  if (self->output->frame_count >= 5) {
++    if (self->output->frame_count == 5) {
++      self->output->first_scheduled_frame = running_time;
++
++      GST_LOG_OBJECT (self, "Setting first_scheduled_frame_time %p at %" GST_TIME_FORMAT
+       " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
+       GST_TIME_ARGS (running_time_duration));
++    }
+ 
+-  ret = self->output->output->ScheduleVideoFrame (frame,
+-      running_time, running_time_duration, GST_SECOND);
+-  if (ret != S_OK) {
+-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
+-        (NULL), ("Failed to schedule frame: 0x%08lx", (unsigned long) ret));
+-    flow_ret = GST_FLOW_ERROR;
+-    goto out;
++    GST_LOG_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
++      " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
++      GST_TIME_ARGS (running_time_duration));
++
++    ret = self->output->output->ScheduleVideoFrame (frame,
++        running_time, running_time_duration, GST_SECOND);
++    if (ret != S_OK) {
++      GST_ELEMENT_ERROR (self, STREAM, FAILED,
++          (NULL), ("Failed to schedule frame: 0x%08lx", (unsigned long) ret));
++      flow_ret = GST_FLOW_ERROR;
++      goto out;
++    }
++  } else {
++    GST_LOG_OBJECT (self, "Skiping video frame %p at %" GST_TIME_FORMAT
++      " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
++      GST_TIME_ARGS (running_time_duration));
++  }
++
++  
++  if (self->output->frame_count == 8) {
++      GST_INFO_OBJECT (self,
++        "Starting scheduled playback at %" GST_TIME_FORMAT,
++        GST_TIME_ARGS (self->output->first_scheduled_frame));
++      ret =
++          self->output->output->StartScheduledPlayback (self->output->first_scheduled_frame,
++          GST_SECOND, 1.0);
++      if (ret != S_OK) {
++        GST_ELEMENT_ERROR (self, STREAM, FAILED,
++            (NULL), ("Failed to start scheduled playback: 0x%08lx",
++                (unsigned long) ret));
++
++        flow_ret = GST_FLOW_ERROR;
++        goto out;
++      }
+   }
+ 
++  self->output->frame_count++;
++
++
++
+   flow_ret = GST_FLOW_OK;
+ 
+ out:
+@@ -1528,19 +1570,19 @@ gst_decklink_video_sink_start_scheduled_playback (GstElement * element)
+     _wait_for_stop_notify (self);
+   }
+ 
+-  GST_INFO_OBJECT (self,
+-      "Starting scheduled playback at %" GST_TIME_FORMAT,
+-      GST_TIME_ARGS (start_time));
+-
+-  res =
+-      self->output->output->StartScheduledPlayback (start_time,
+-      GST_SECOND, 1.0);
+-  if (res != S_OK) {
+-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
+-        (NULL), ("Failed to start scheduled playback: 0x%08lx",
+-            (unsigned long) res));
+-    return;
+-  }
++  // GST_INFO_OBJECT (self,
++  //     "Starting scheduled playback at %" GST_TIME_FORMAT,
++  //     GST_TIME_ARGS (start_time));
++
++  // res =
++  //     self->output->output->StartScheduledPlayback (start_time,
++  //     GST_SECOND, 1.0);
++  // if (res != S_OK) {
++  //   GST_ELEMENT_ERROR (self, STREAM, FAILED,
++  //       (NULL), ("Failed to start scheduled playback: 0x%08lx",
++  //           (unsigned long) res));
++  //   return;
++  //}
+ 
+   self->output->started = TRUE;
+ }
+-- 
+2.20.1.windows.1
+

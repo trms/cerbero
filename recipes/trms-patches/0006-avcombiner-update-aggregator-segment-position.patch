@@ -1,0 +1,30 @@
+From 2b586c649873e48155fbe8474070a12517827906 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Wed, 16 Jun 2021 01:01:29 +0200
+Subject: [PATCH 6/6] avcombiner: update aggregator segment position
+
+The subclass uses gst_aggregator_simple_get_next_time, which relies
+on segment.position being appropriately updated. Not doing so was
+causing aggregator to busy loop and always wake up immediately
+when "waiting"
+---
+ gst/avcombiner/gstavcombiner.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/gst/avcombiner/gstavcombiner.c b/gst/avcombiner/gstavcombiner.c
+index 028d96104..6f97ef006 100644
+--- a/gst/avcombiner/gstavcombiner.c
++++ b/gst/avcombiner/gstavcombiner.c
+@@ -132,6 +132,9 @@ gst_av_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
+     gst_caps_unref (caps);
+   }
+ 
++  GST_AGGREGATOR_PAD (aggregator->srcpad)->segment.position =
++      GST_BUFFER_PTS (video_buffer);
++
+   return gst_aggregator_finish_buffer (GST_AGGREGATOR_CAST (self),
+       video_buffer);
+ }
+-- 
+2.20.1.windows.1
+

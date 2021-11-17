@@ -1,0 +1,91 @@
+From cbb5af055f2d2e182288d05cfa924d31b4973605 Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Tue, 25 May 2021 19:47:28 +0900
+Subject: [PATCH 1/2] interlace: Drop framerate from query caps of sinkpad
+
+Query caps should return caps which represent the element can accept,
+not resulting format.
+
+Fixing negotiation error with
+gst-launch-1.0 videotestsrc ! video/x-raw,framerate=25/1 ! interlace field-pattern=0 ! fakesink
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/merge_requests/2282>
+---
+ gst/interlace/gstinterlace.c | 21 ++++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/gst/interlace/gstinterlace.c b/gst/interlace/gstinterlace.c
+index 409de1b1eb..8858d97f23 100644
+--- a/gst/interlace/gstinterlace.c
++++ b/gst/interlace/gstinterlace.c
+@@ -980,18 +980,25 @@ gst_interlace_getcaps (GstPad * pad, GstInterlace * interlace, GstCaps * filter)
+     icaps = gst_caps_merge (icaps, alternate);
+   }
+ 
+-  if (pattern == GST_INTERLACE_PATTERN_1_1) {
+-    icaps =
+-        gst_interlace_caps_double_framerate (icaps, (pad == interlace->srcpad),
+-        FALSE);
+-  } else if (pattern != GST_INTERLACE_PATTERN_2_2) {
+-    GST_FIXME_OBJECT (interlace,
+-        "Add calculations for telecine framerate conversions");
++  /* Drop framerate for sinkpad */
++  if (pad == interlace->sinkpad) {
+     for (i = 0; i < gst_caps_get_size (icaps); ++i) {
+       GstStructure *s = gst_caps_get_structure (icaps, i);
+ 
+       gst_structure_remove_field (s, "framerate");
+     }
++  } else {
++    if (pattern == GST_INTERLACE_PATTERN_1_1) {
++      icaps = gst_interlace_caps_double_framerate (icaps, TRUE, FALSE);
++    } else if (pattern != GST_INTERLACE_PATTERN_2_2) {
++      GST_FIXME_OBJECT (interlace,
++          "Add calculations for telecine framerate conversions");
++      for (i = 0; i < gst_caps_get_size (icaps); ++i) {
++        GstStructure *s = gst_caps_get_structure (icaps, i);
++
++        gst_structure_remove_field (s, "framerate");
++      }
++    }
+   }
+ 
+   if (clean_filter)
+-- 
+GitLab
+
+
+From 9f010bdecb81d7e15e377e7d6babb8a69afd998d Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Tue, 25 May 2021 20:21:34 +0900
+Subject: [PATCH 2/2] interlace: Don't set field-order field for progressive
+ caps
+
+That would cause negotiation issue
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/merge_requests/2282>
+---
+ gst/interlace/gstinterlace.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/gst/interlace/gstinterlace.c b/gst/interlace/gstinterlace.c
+index 8858d97f23..fa17d42ae2 100644
+--- a/gst/interlace/gstinterlace.c
++++ b/gst/interlace/gstinterlace.c
+@@ -961,9 +961,13 @@ gst_interlace_getcaps (GstPad * pad, GstInterlace * interlace, GstCaps * filter)
+      * Interlaced feature and set interlace-mode=progressive */
+     for (i = 0; i < gst_caps_get_size (icaps); ++i) {
+       GstCapsFeatures *features;
++      GstStructure *s = gst_caps_get_structure (icaps, i);
+ 
+       features = gst_caps_get_features (icaps, i);
+       gst_caps_features_remove (features, GST_CAPS_FEATURE_FORMAT_INTERLACED);
++
++      /* Drop field-order field for sinkpad */
++      gst_structure_remove_field (s, "field-order");
+     }
+ 
+     gst_caps_set_simple (icaps, "interlace-mode", G_TYPE_STRING, "progressive",
+-- 
+GitLab
+

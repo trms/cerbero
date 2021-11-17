@@ -1,0 +1,29 @@
+From fed91be55e0f028647675ef367574a251888a649 Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Tue, 1 Dec 2020 09:02:18 -0500
+Subject: [PATCH] replace assert with debug stack strace
+
+---
+ libs/gst/base/gstaggregator.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/libs/gst/base/gstaggregator.c b/libs/gst/base/gstaggregator.c
+index 0e5475c62..4d093ccc7 100644
+--- a/libs/gst/base/gstaggregator.c
++++ b/libs/gst/base/gstaggregator.c
+@@ -1658,7 +1658,11 @@ gst_aggregator_default_sink_event (GstAggregator * self,
+     {
+       SRC_LOCK (self);
+       PAD_LOCK (aggpad);
+-      g_assert (aggpad->priv->num_buffers == 0);
++      if (aggpad->priv->num_buffers > 0)
++      {
++        gst_debug_print_stack_trace();
++      }
++      //g_assert (aggpad->priv->num_buffers == 0);
+       aggpad->priv->eos = TRUE;
+       PAD_UNLOCK (aggpad);
+       SRC_BROADCAST (self);
+-- 
+2.20.1.windows.1
+

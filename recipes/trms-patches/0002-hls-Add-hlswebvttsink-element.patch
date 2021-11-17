@@ -1,0 +1,938 @@
+From e8c9effc1f55ee274f2726f04be21aee7c22d07a Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Tue, 24 Aug 2021 20:39:14 +0900
+Subject: [PATCH 2/2] hls: Add hlswebvttsink element
+
+Introduce a new hlssink element for producing WebVTT playlist.
+---
+ ext/hls/gsthlselements.h   |   1 +
+ ext/hls/gsthlsplugin.c     |   1 +
+ ext/hls/gsthlswebvttsink.c | 760 +++++++++++++++++++++++++++++++++++++
+ ext/hls/gsthlswebvttsink.h |  35 ++
+ ext/hls/gstm3u8playlist.c  |  19 +-
+ ext/hls/gstm3u8playlist.h  |   5 +
+ ext/hls/meson.build        |   1 +
+ 7 files changed, 820 insertions(+), 2 deletions(-)
+ create mode 100644 ext/hls/gsthlswebvttsink.c
+ create mode 100644 ext/hls/gsthlswebvttsink.h
+
+diff --git a/ext/hls/gsthlselements.h b/ext/hls/gsthlselements.h
+index 4395230e4..5b4d514c3 100644
+--- a/ext/hls/gsthlselements.h
++++ b/ext/hls/gsthlselements.h
+@@ -10,6 +10,7 @@ void hls_element_init (GstPlugin * plugin);
+ GST_ELEMENT_REGISTER_DECLARE (hlsdemux);
+ GST_ELEMENT_REGISTER_DECLARE (hlssink);
+ GST_ELEMENT_REGISTER_DECLARE (hlssink2);
++GST_ELEMENT_REGISTER_DECLARE (hlswebvttsink);
+ 
+ GST_DEBUG_CATEGORY_EXTERN (hls_debug);
+ 
+diff --git a/ext/hls/gsthlsplugin.c b/ext/hls/gsthlsplugin.c
+index cad1b5583..84417c660 100644
+--- a/ext/hls/gsthlsplugin.c
++++ b/ext/hls/gsthlsplugin.c
+@@ -14,6 +14,7 @@ plugin_init (GstPlugin * plugin)
+   ret |= GST_ELEMENT_REGISTER (hlsdemux, plugin);
+   ret |= GST_ELEMENT_REGISTER (hlssink, plugin);
+   ret |= GST_ELEMENT_REGISTER (hlssink2, plugin);
++  ret |= GST_ELEMENT_REGISTER (hlswebvttsink, plugin);
+   return ret;
+ }
+ 
+diff --git a/ext/hls/gsthlswebvttsink.c b/ext/hls/gsthlswebvttsink.c
+new file mode 100644
+index 000000000..8ae165cc3
+--- /dev/null
++++ b/ext/hls/gsthlswebvttsink.c
+@@ -0,0 +1,760 @@
++/* GStreamer
++ * Copyright (C) 2011 Alessandro Decina <alessandro.d@gmail.com>
++ * Copyright (C) 2017 Sebastian Dröge <sebastian@centricular.com>
++ * Copyright (C) 2021 Seungha Yang <seungha@centricular.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++/**
++ * SECTION:element-hlswebvttsink
++ * @title: hlswebvttsink
++ *
++ * HTTP Live Streaming sink/server for WebVTT
++ *
++ * Since: 1.20
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "gsthlselements.h"
++#include "gstm3u8playlist.h"
++#include "gsthlswebvttsink.h"
++#include <gst/pbutils/pbutils.h>
++#include <gst/video/video.h>
++#include <glib/gstdio.h>
++#include <memory.h>
++#include <string.h>
++
++GST_DEBUG_CATEGORY_STATIC (gst_hls_webvtt_sink_debug);
++#define GST_CAT_DEFAULT gst_hls_webvtt_sink_debug
++
++enum
++{
++  PROP_0,
++  PROP_LOCATION,
++  PROP_PLAYLIST_LOCATION,
++  PROP_PLAYLIST_ROOT,
++  PROP_MAX_FILES,
++  PROP_TARGET_DURATION,
++  PROP_PLAYLIST_LENGTH,
++  PROP_MPEGTS_TIME_OFFSET,
++};
++
++#define DEFAULT_LOCATION "segment%05d.webvtt"
++#define DEFAULT_PLAYLIST_LOCATION "playlist.m3u8"
++#define DEFAULT_PLAYLIST_ROOT NULL
++#define DEFAULT_MAX_FILES 10
++#define DEFAULT_TARGET_DURATION 15
++#define DEFAULT_PLAYLIST_LENGTH 5
++#define DEFAULT_TIMESTAMP_MAP_MPEGTS 324000000
++
++#define GST_M3U8_PLAYLIST_VERSION 3
++
++struct _GstHlsWebvttSink
++{
++  GstBin bin;
++
++  GstPad *sinkpad;
++  GstElement *multifilesink;
++  GstSegment segment;
++
++  gboolean elements_created;
++
++  gchar *location;
++  gchar *playlist_location;
++  gchar *playlist_root;
++  guint playlist_length;
++  GstM3U8Playlist *playlist;
++  guint index;
++  GstClockTime last_running_time;
++  gint max_files;
++  gint target_duration;
++  GstClockTime target_duration_ns;
++  guint64 mpegts_time_offset;
++  gchar *timestamp_map;
++
++  GstM3U8PlaylistRenderState state;
++};
++
++static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
++    GST_PAD_SINK,
++    GST_PAD_ALWAYS,
++    GST_STATIC_CAPS ("application/x-subtitle-vtt-fragmented"));
++
++#define gst_hls_webvtt_sink_parent_class parent_class
++G_DEFINE_TYPE (GstHlsWebvttSink, gst_hls_webvtt_sink, GST_TYPE_BIN);
++#define _do_init \
++  hls_element_init (plugin); \
++  GST_DEBUG_CATEGORY_INIT (gst_hls_webvtt_sink_debug, "hlswebvttsink", 0, "hlswebvttsink");
++
++GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (hlswebvttsink, "hlswebvttsink",
++    GST_RANK_NONE, GST_TYPE_HLS_WEBVTT_SINK, _do_init);
++
++static void gst_hls_webvtt_sink_finalize (GObject * object);
++static void gst_hls_webvtt_sink_set_property (GObject * object, guint prop_id,
++    const GValue * value, GParamSpec * spec);
++static void gst_hls_webvtt_sink_get_property (GObject * object, guint prop_id,
++    GValue * value, GParamSpec * spec);
++static void gst_hls_webvtt_sink_handle_message (GstBin * bin,
++    GstMessage * message);
++static void gst_hls_webvtt_sink_reset (GstHlsWebvttSink * self);
++static GstStateChangeReturn
++gst_hls_webvtt_sink_change_state (GstElement * element, GstStateChange trans);
++static GstFlowReturn gst_hls_webvtt_sink_chain (GstPad * pad,
++    GstObject * parent, GstBuffer * buf);
++static gboolean gst_hls_webvtt_sink_event (GstPad * pad, GstObject * parent,
++    GstEvent * event);
++
++static void
++gst_hls_webvtt_sink_class_init (GstHlsWebvttSinkClass * klass)
++{
++  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
++  GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
++  GstBinClass *bin_class = GST_BIN_CLASS (klass);
++
++  gobject_class->finalize = gst_hls_webvtt_sink_finalize;
++  gobject_class->set_property = gst_hls_webvtt_sink_set_property;
++  gobject_class->get_property = gst_hls_webvtt_sink_get_property;
++
++  g_object_class_install_property (gobject_class, PROP_LOCATION,
++      g_param_spec_string ("location", "File Location",
++          "Location of the file to write", DEFAULT_LOCATION,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_PLAYLIST_LOCATION,
++      g_param_spec_string ("playlist-location", "Playlist Location",
++          "Location of the playlist to write", DEFAULT_PLAYLIST_LOCATION,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_PLAYLIST_ROOT,
++      g_param_spec_string ("playlist-root", "Playlist Root",
++          "Location of the playlist to write", DEFAULT_PLAYLIST_ROOT,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_MAX_FILES,
++      g_param_spec_uint ("max-files", "Max files",
++          "Maximum number of files to keep on disk. Once the maximum is reached,"
++          "old files start to be deleted to make room for new ones.", 0,
++          G_MAXUINT, DEFAULT_MAX_FILES,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_TARGET_DURATION,
++      g_param_spec_uint ("target-duration", "Target duration",
++          "The target duration in seconds of a segment/file. "
++          "(0 - disabled, useful for management of segment duration by the "
++          "streaming server)", 0, G_MAXUINT, DEFAULT_TARGET_DURATION,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_PLAYLIST_LENGTH,
++      g_param_spec_uint ("playlist-length", "Playlist length",
++          "Length of HLS playlist. To allow players to conform to section 6.3.3 "
++          "of the HLS specification, this should be at least 3. If set to 0, "
++          "the playlist will be infinite.", 0, G_MAXUINT,
++          DEFAULT_PLAYLIST_LENGTH,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (gobject_class, PROP_MPEGTS_TIME_OFFSET,
++      g_param_spec_uint64 ("mpegts-time-offset", "MPEG TS Time Offset",
++          "Time offset corresponding to the running time zero in MPEG TS time "
++          "(i.e., 90khz clock base). Default is 324000000 "
++          "(1 hour, 60 * 60 * 90000) which is identical to the offset used in "
++          "mpegtsmux element",
++          0, G_MAXUINT64, DEFAULT_TIMESTAMP_MAP_MPEGTS,
++          G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
++          G_PARAM_STATIC_STRINGS));
++
++  gst_element_class_add_static_pad_template (element_class, &sink_template);
++  gst_element_class_set_static_metadata (element_class,
++      "HTTP Live Streaming sink for WebVTT", "Sink",
++      "HTTP Live Streaming sink for WebVTT",
++      "Seungha Yang <seungha@centricular.com>");
++
++  element_class->change_state =
++      GST_DEBUG_FUNCPTR (gst_hls_webvtt_sink_change_state);
++
++  bin_class->handle_message =
++      GST_DEBUG_FUNCPTR (gst_hls_webvtt_sink_handle_message);
++}
++
++static void
++gst_hls_webvtt_sink_init (GstHlsWebvttSink * self)
++{
++  GstPadTemplate *templ;
++  GstPad *pad;
++
++  GST_OBJECT_FLAG_SET (self, GST_ELEMENT_FLAG_SINK);
++
++  self->location = g_strdup (DEFAULT_LOCATION);
++  self->playlist_location = g_strdup (DEFAULT_PLAYLIST_LOCATION);
++  self->playlist_root = g_strdup (DEFAULT_PLAYLIST_ROOT);
++  self->playlist_length = DEFAULT_PLAYLIST_LENGTH;
++  self->max_files = DEFAULT_MAX_FILES;
++  self->target_duration = DEFAULT_TARGET_DURATION;
++  self->target_duration_ns = DEFAULT_TARGET_DURATION * GST_SECOND;
++  self->mpegts_time_offset = DEFAULT_TIMESTAMP_MAP_MPEGTS;
++
++  templ = gst_static_pad_template_get (&sink_template);
++  self->sinkpad = gst_ghost_pad_new_no_target_from_template ("sink", templ);
++  gst_object_unref (templ);
++
++  gst_pad_set_chain_function (self->sinkpad,
++      GST_DEBUG_FUNCPTR (gst_hls_webvtt_sink_chain));
++  gst_pad_set_event_function (self->sinkpad,
++      GST_DEBUG_FUNCPTR (gst_hls_webvtt_sink_event));
++  gst_element_add_pad (GST_ELEMENT_CAST (self), self->sinkpad);
++
++  self->multifilesink = gst_element_factory_make ("multifilesink", NULL);
++  if (!self->multifilesink) {
++    GST_ERROR_OBJECT (self, "Missing multifilesink element");
++    return;
++  }
++
++  g_object_set (self->multifilesink, "location", self->location,
++      "next-file", 3, "post-messages", TRUE, "max-files", self->max_files,
++      NULL);
++
++  gst_bin_add (GST_BIN_CAST (self), self->multifilesink);
++
++  pad = gst_element_get_static_pad (self->multifilesink, "sink");
++  gst_ghost_pad_set_target (GST_GHOST_PAD (self->sinkpad), pad);
++  gst_object_unref (pad);
++
++  gst_hls_webvtt_sink_reset (self);
++}
++
++static void
++gst_hls_webvtt_sink_finalize (GObject * object)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (object);
++
++  g_free (self->location);
++  g_free (self->playlist_location);
++  g_free (self->playlist_root);
++  g_clear_pointer (&self->playlist, gst_m3u8_playlist_free);
++  g_free (self->timestamp_map);
++
++  G_OBJECT_CLASS (parent_class)->finalize (object);
++}
++
++static void
++gst_hls_webvtt_sink_set_property (GObject * object, guint prop_id,
++    const GValue * value, GParamSpec * pspec)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (object);
++
++  switch (prop_id) {
++    case PROP_LOCATION:
++      g_free (self->location);
++      self->location = g_value_dup_string (value);
++      if (self->multifilesink)
++        g_object_set (self->multifilesink, "location", self->location, NULL);
++      break;
++    case PROP_PLAYLIST_LOCATION:
++      g_free (self->playlist_location);
++      self->playlist_location = g_value_dup_string (value);
++      break;
++    case PROP_PLAYLIST_ROOT:
++      g_free (self->playlist_root);
++      self->playlist_root = g_value_dup_string (value);
++      break;
++    case PROP_MAX_FILES:
++      self->max_files = g_value_get_uint (value);
++      if (self->multifilesink) {
++        g_object_set (self->multifilesink, "max-files", self->max_files, NULL);
++      }
++      break;
++    case PROP_TARGET_DURATION:
++      self->target_duration = g_value_get_uint (value);
++      self->target_duration_ns = self->target_duration * GST_SECOND;
++      break;
++    case PROP_PLAYLIST_LENGTH:
++      self->playlist_length = g_value_get_uint (value);
++      self->playlist->window_size = self->playlist_length;
++      break;
++    case PROP_MPEGTS_TIME_OFFSET:
++      self->mpegts_time_offset = g_value_get_uint64 (value);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++  }
++}
++
++static void
++gst_hls_webvtt_sink_get_property (GObject * object, guint prop_id,
++    GValue * value, GParamSpec * pspec)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (object);
++
++  switch (prop_id) {
++    case PROP_LOCATION:
++      g_value_set_string (value, self->location);
++      break;
++    case PROP_PLAYLIST_LOCATION:
++      g_value_set_string (value, self->playlist_location);
++      break;
++    case PROP_PLAYLIST_ROOT:
++      g_value_set_string (value, self->playlist_root);
++      break;
++    case PROP_MAX_FILES:
++      g_value_set_uint (value, self->max_files);
++      break;
++    case PROP_TARGET_DURATION:
++      g_value_set_uint (value, self->target_duration);
++      break;
++    case PROP_PLAYLIST_LENGTH:
++      g_value_set_uint (value, self->playlist_length);
++      break;
++    case PROP_MPEGTS_TIME_OFFSET:
++      g_value_set_uint64 (value, self->mpegts_time_offset);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++  }
++}
++
++static void
++gst_hls_webvtt_sink_reset (GstHlsWebvttSink * self)
++{
++  self->index = 0;
++  self->last_running_time = GST_CLOCK_TIME_NONE;
++
++  g_clear_pointer (&self->playlist, gst_m3u8_playlist_free);
++  g_clear_pointer (&self->timestamp_map, g_free);
++
++  /* Convering uint64 to float is always problematic. Since we are supposed
++   * to producing equal (and integer) duration which is the same as
++   * target-duration apart from the last fragment, %.3f should be fine */
++  self->playlist =
++      gst_m3u8_playlist_new_full (GST_M3U8_PLAYLIST_VERSION,
++      self->playlist_length, "%.3f");
++
++  self->state = GST_M3U8_PLAYLIST_RENDER_INIT;
++}
++
++static gboolean
++gst_hls_webvtt_ensure_elements (GstHlsWebvttSink * self)
++{
++  if (!self->multifilesink) {
++    GST_ELEMENT_ERROR (self, CORE, MISSING_PLUGIN,
++        (("Missing element '%s' - check your GStreamer installation."),
++            "multifilesink"), (NULL));
++    return FALSE;
++  }
++
++  return TRUE;
++}
++
++static void
++gst_hls_webvtt_sink_write_playlist (GstHlsWebvttSink * self)
++{
++  char *playlist_content;
++  GError *error = NULL;
++
++  playlist_content = gst_m3u8_playlist_render (self->playlist);
++  if (!g_file_set_contents (self->playlist_location,
++          playlist_content, -1, &error)) {
++    GST_ERROR ("Failed to write playlist: %s", error->message);
++    GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE,
++        (("Failed to write playlist '%s'."), error->message), (NULL));
++    g_error_free (error);
++    error = NULL;
++  }
++  g_free (playlist_content);
++}
++
++static gboolean
++schedule_next_key_unit (GstHlsWebvttSink * self)
++{
++  GstClockTime running_time;
++  GstPad *sinkpad = self->sinkpad;
++  GstEvent *event;
++
++  if (self->target_duration == 0)
++    return TRUE;
++
++  running_time = self->last_running_time + self->target_duration_ns;
++  GST_INFO_OBJECT (self, "sending upstream force-key-unit, index %d "
++      "now %" GST_TIME_FORMAT " target %" GST_TIME_FORMAT,
++      self->index + 1, GST_TIME_ARGS (self->last_running_time),
++      GST_TIME_ARGS (running_time));
++
++  event = gst_video_event_new_upstream_force_key_unit (running_time,
++      TRUE, self->index + 1);
++
++  if (!gst_pad_push_event (sinkpad, event)) {
++    GST_ERROR_OBJECT (self, "Failed to push upstream force key unit event");
++    return FALSE;
++  }
++
++  return TRUE;
++}
++
++static void
++gst_hls_webvtt_sink_handle_message (GstBin * bin, GstMessage * message)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (bin);
++
++  switch (message->type) {
++    case GST_MESSAGE_ELEMENT:
++    {
++      const gchar *filename;
++      GstClockTime running_time, duration;
++      gboolean discont = FALSE;
++      gchar *entry_location;
++      const GstStructure *structure;
++
++      structure = gst_message_get_structure (message);
++      if (strcmp (gst_structure_get_name (structure), "GstMultiFileSink"))
++        break;
++
++      filename = gst_structure_get_string (structure, "filename");
++      gst_structure_get_clock_time (structure, "running-time", &running_time);
++      duration = running_time - self->last_running_time;
++      self->last_running_time = running_time;
++
++      if (!self->playlist_root) {
++        entry_location = g_path_get_basename (filename);
++      } else {
++        gchar *name = g_path_get_basename (filename);
++        entry_location = g_build_filename (self->playlist_root, name, NULL);
++        g_free (name);
++      }
++
++      gst_m3u8_playlist_add_entry (self->playlist, entry_location,
++          NULL, duration, self->index, discont);
++      g_free (entry_location);
++      self->index++;
++
++      gst_hls_webvtt_sink_write_playlist (self);
++      self->state |= GST_M3U8_PLAYLIST_RENDER_STARTED;
++
++      /* multifilesink is an internal implementation detail. If applications
++       * need a notification, we should probably do our own message */
++      GST_DEBUG_OBJECT (bin, "dropping message %" GST_PTR_FORMAT, message);
++      gst_message_unref (message);
++      return;
++    }
++    case GST_MESSAGE_EOS:{
++      self->playlist->end_list = TRUE;
++      gst_hls_webvtt_sink_write_playlist (self);
++      self->state |= GST_M3U8_PLAYLIST_RENDER_ENDED;
++      break;
++    }
++    default:
++      break;
++  }
++
++  GST_BIN_CLASS (parent_class)->handle_message (bin, message);
++}
++
++static GstStateChangeReturn
++gst_hls_webvtt_sink_change_state (GstElement * element, GstStateChange trans)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (element);
++  GstStateChangeReturn ret = GST_STATE_CHANGE_SUCCESS;
++
++  switch (trans) {
++    case GST_STATE_CHANGE_NULL_TO_READY:
++      if (!gst_hls_webvtt_ensure_elements (self)) {
++        return GST_STATE_CHANGE_FAILURE;
++      }
++      break;
++    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
++      break;
++    default:
++      break;
++  }
++
++  ret = GST_ELEMENT_CLASS (parent_class)->change_state (element, trans);
++
++  switch (trans) {
++    case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
++      break;
++    case GST_STATE_CHANGE_PAUSED_TO_READY:
++      /* drain playlist with #EXT-X-ENDLIST */
++      if (self->playlist && (self->state & GST_M3U8_PLAYLIST_RENDER_STARTED) &&
++          !(self->state & GST_M3U8_PLAYLIST_RENDER_ENDED)) {
++        self->playlist->end_list = TRUE;
++        gst_hls_webvtt_sink_write_playlist (self);
++      }
++      gst_hls_webvtt_sink_reset (self);
++      break;
++    case GST_STATE_CHANGE_READY_TO_NULL:
++      gst_hls_webvtt_sink_reset (self);
++      break;
++    default:
++      break;
++  }
++
++  return ret;
++}
++
++static void
++gst_hls_webvtt_sink_timestamp_to_string (GstClockTime timestamp, GString * str)
++{
++  guint h, m, s, ms;
++
++  h = timestamp / (3600 * GST_SECOND);
++
++  timestamp -= h * 3600 * GST_SECOND;
++  m = timestamp / (60 * GST_SECOND);
++
++  timestamp -= m * 60 * GST_SECOND;
++  s = timestamp / GST_SECOND;
++
++  timestamp -= s * GST_SECOND;
++  ms = timestamp / GST_MSECOND;
++
++  g_string_append_printf (str, "%02d:%02d:%02d.%03d", h, m, s, ms);
++}
++
++#define GSTTIME_TO_MPEGTIME(time) \
++    gst_util_uint64_scale (time, 90000, GST_SECOND)
++
++static GstBuffer *
++gst_hls_webvtt_sink_insert_timestamp_map (GstHlsWebvttSink * self,
++    GstBuffer * buf)
++{
++  /* Minimal validation */
++  static const gchar webvtt_bom_hdr[] = {
++    0xef, 0xbb, 0xbf, 'W', 'E', 'B', 'V', 'T', 'T'
++  };
++  static const gchar webvtt_hdr[] = {
++    'W', 'E', 'B', 'V', 'T', 'T'
++  };
++  GstBuffer *header_buf = NULL;
++  GstMapInfo map;
++  gchar *next_line = NULL;
++  gsize next_line_pos = 0;
++  GString *str = NULL;
++  gsize len;
++
++  if (!self->timestamp_map) {
++    GString *s = g_string_new ("X-TIMESTAMP-MAP=MPEGTS:");
++    GstClockTime running_time;
++    guint64 running_time_in_mpegts;
++
++    /* Calculate mpegts time corresponding to the current buffer running time */
++    running_time = gst_segment_to_running_time (&self->segment,
++        GST_FORMAT_TIME, GST_BUFFER_PTS (buf));
++    running_time_in_mpegts = GSTTIME_TO_MPEGTIME (running_time);
++    running_time_in_mpegts += self->mpegts_time_offset;
++
++    /* Then pick the 33 bits to cover rollover case */
++    running_time_in_mpegts &= 0x1ffffffff;
++
++    g_string_append_printf (s,
++        "%" G_GUINT64_FORMAT ",LOCAL:", running_time_in_mpegts);
++    /* XXX: Assume written webvtt cue timestamp is equal to buffer timestmap */
++    gst_hls_webvtt_sink_timestamp_to_string (GST_BUFFER_PTS (buf), s);
++
++    self->timestamp_map = g_string_free (s, FALSE);
++    GST_INFO_OBJECT (self,
++        "segment %" GST_SEGMENT_FORMAT ", first buffer pts: %"
++        GST_TIME_FORMAT ", running time %" GST_TIME_FORMAT ", timestamp map %s",
++        &self->segment, GST_TIME_ARGS (GST_BUFFER_PTS (buf)),
++        GST_TIME_ARGS (running_time), self->timestamp_map);
++  }
++
++  if (!gst_buffer_map (buf, &map, GST_MAP_READ)) {
++    GST_ERROR_OBJECT (self, "Failed to map header buffer for reading");
++    gst_buffer_unref (buf);
++
++    return NULL;
++  }
++
++  if (map.size < sizeof (webvtt_hdr))
++    goto too_short;
++
++  if (memcmp (map.data, webvtt_hdr, sizeof (webvtt_hdr)) != 0) {
++    if (map.size < sizeof (webvtt_bom_hdr))
++      goto invalid_header;
++
++    if (memcmp (map.data, webvtt_bom_hdr, sizeof (webvtt_bom_hdr)) != 0)
++      goto invalid_header;
++  }
++
++  len = map.size;
++  if (map.data[map.size - 1] == '\0')
++    len--;
++
++  str = g_string_new_len (map.data, len);
++
++  /* Find the first WebVTT line terminator CRLF, LF or CR */
++  next_line = strstr (map.data, "\r\n");
++  if (next_line)
++    next_line_pos = (next_line - map.data) + 2;
++
++  if (!next_line_pos) {
++    next_line = strchr (map.data, '\n');
++    if (next_line)
++      next_line_pos = (next_line - map.data) + 1;
++  }
++
++  if (!next_line_pos) {
++    next_line = strchr (map.data, '\r');
++    if (next_line)
++      next_line_pos = (next_line - map.data) + 1;
++  }
++  gst_buffer_unmap (buf, &map);
++
++  if (!next_line_pos) {
++    GST_WARNING_OBJECT (self, "Failed to find WebVTT line terminator");
++    g_string_append_c (str, '\n');
++    g_string_append (str, self->timestamp_map);
++    g_string_append_c (str, '\n');
++  } else {
++    g_string_insert_len (str, next_line_pos, self->timestamp_map, -1);
++    g_string_insert_c (str, next_line_pos + strlen (self->timestamp_map), '\n');
++  }
++
++out:
++  len = str->len;
++  header_buf = gst_buffer_new_wrapped (g_string_free (str, FALSE), len);
++
++  /* Copy timestamp and flags */
++  GST_BUFFER_PTS (header_buf) = GST_BUFFER_PTS (buf);
++  GST_BUFFER_DTS (header_buf) = GST_BUFFER_DTS (buf);
++  GST_BUFFER_DURATION (header_buf) = GST_BUFFER_DURATION (buf);
++  GST_BUFFER_FLAGS (header_buf) = GST_BUFFER_FLAGS (buf);
++
++  gst_buffer_unref (buf);
++
++  return header_buf;
++
++too_short:
++  {
++    GST_ERROR_OBJECT (self, "Header buffer size is too small");
++    gst_buffer_unmap (buf, &map);
++    gst_buffer_unref (buf);
++
++    return NULL;
++  }
++
++invalid_header:
++  {
++    GST_ERROR_OBJECT (self, "Invalid WebVTT header");
++    gst_buffer_unmap (buf, &map);
++    gst_buffer_unref (buf);
++
++    return NULL;
++  }
++}
++
++static GstFlowReturn
++gst_hls_webvtt_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buf)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (parent);
++
++  if (!GST_BUFFER_PTS_IS_VALID (buf)) {
++    GST_ERROR_OBJECT (self, "Invalid timestamp");
++    gst_buffer_unref (buf);
++    return GST_FLOW_ERROR;
++  }
++
++  if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_HEADER) ||
++      !GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_DELTA_UNIT)) {
++    buf = gst_hls_webvtt_sink_insert_timestamp_map (self, buf);
++
++    if (!buf)
++      return GST_FLOW_ERROR;
++
++    if (!GST_CLOCK_TIME_IS_VALID (self->last_running_time)) {
++      /* This is the first buffer */
++      self->last_running_time = gst_segment_to_running_time (&self->segment,
++          GST_FORMAT_TIME, GST_BUFFER_PTS (buf));
++      schedule_next_key_unit (self);
++    } else {
++      GstEvent *event;
++      GstClockTime stream_time;
++      GstClockTime running_time;
++      GstPad *target = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
++      gboolean ret;
++
++      stream_time = gst_segment_to_stream_time (&self->segment,
++          GST_FORMAT_TIME, GST_BUFFER_PTS (buf));
++      running_time = gst_segment_to_running_time (&self->segment,
++          GST_FORMAT_TIME, GST_BUFFER_PTS (buf));
++
++      /* mutilfilesink will split fragment per force key unit event */
++      event =
++          gst_video_event_new_downstream_force_key_unit (GST_BUFFER_PTS (buf),
++          stream_time, running_time, TRUE, self->index);
++
++      GST_DEBUG_OBJECT (self, "Send force key unit %" GST_PTR_FORMAT, event);
++
++      ret = gst_pad_send_event (target, event);
++      gst_object_unref (target);
++
++      if (!ret) {
++        GST_ERROR_OBJECT (self, "Failed to send force key unit event");
++        gst_buffer_unref (buf);
++        return GST_FLOW_ERROR;
++      }
++
++      schedule_next_key_unit (self);
++    }
++  }
++
++  return gst_proxy_pad_chain_default (pad, parent, buf);
++}
++
++static gboolean
++gst_hls_webvtt_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
++{
++  GstHlsWebvttSink *self = GST_HLS_WEBVTT_SINK (parent);
++
++  switch (GST_EVENT_TYPE (event)) {
++    case GST_EVENT_SEGMENT:
++    {
++      const GstSegment *segment;
++      gst_event_parse_segment (event, &segment);
++
++      if (segment->format != GST_FORMAT_TIME) {
++        GST_WARNING_OBJECT (self, "Only time format segment is allowed");
++        gst_event_unref (event);
++        return FALSE;
++      }
++
++      GST_DEBUG_OBJECT (self, "New segment %" GST_SEGMENT_FORMAT, segment);
++
++      gst_segment_copy_into (segment, &self->segment);
++      break;
++    }
++    case GST_EVENT_CUSTOM_DOWNSTREAM:
++    {
++      if (!gst_video_event_is_force_key_unit (event))
++        break;
++
++      /* Drop this event, but we will push fku event to multifilesink
++       * per header buffer */
++      GST_DEBUG_OBJECT (self, "Dropping force key unit event %" GST_PTR_FORMAT,
++          event);
++      gst_event_unref (event);
++      return TRUE;
++    }
++    default:
++      break;
++  }
++
++  return gst_pad_event_default (pad, parent, event);
++}
+diff --git a/ext/hls/gsthlswebvttsink.h b/ext/hls/gsthlswebvttsink.h
+new file mode 100644
+index 000000000..9185dab8d
+--- /dev/null
++++ b/ext/hls/gsthlswebvttsink.h
+@@ -0,0 +1,35 @@
++/* GStreamer
++ * Copyright (C) 2021 Seungha Yang <seungha@centricular.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++#ifndef __GST_HLS_WEBVTT_SINK_H__
++#define __GST_HLS_WEBVTT_SINK_H__
++
++#include <gst/gst.h>
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_HLS_WEBVTT_SINK (gst_hls_webvtt_sink_get_type())
++G_DECLARE_FINAL_TYPE (GstHlsWebvttSink, gst_hls_webvtt_sink,
++    GST, HLS_WEBVTT_SINK, GstBin);
++
++gboolean  gst_hls_webvtt_sink_plugin_init (GstPlugin * plugin);
++
++G_END_DECLS
++
++#endif /* __GST_HLS_WEB_VTT_SINK_H__ */
+diff --git a/ext/hls/gstm3u8playlist.c b/ext/hls/gstm3u8playlist.c
+index 8da900432..77a129d0d 100644
+--- a/ext/hls/gstm3u8playlist.c
++++ b/ext/hls/gstm3u8playlist.c
+@@ -70,6 +70,13 @@ gst_m3u8_entry_free (GstM3U8Entry * entry)
+ 
+ GstM3U8Playlist *
+ gst_m3u8_playlist_new (guint version, guint window_size)
++{
++  return gst_m3u8_playlist_new_full (version, window_size, NULL);
++}
++
++GstM3U8Playlist *
++gst_m3u8_playlist_new_full (guint version, guint window_size,
++    const gchar * duration_format)
+ {
+   GstM3U8Playlist *playlist;
+ 
+@@ -80,6 +87,13 @@ gst_m3u8_playlist_new (guint version, guint window_size)
+   playlist->end_list = FALSE;
+   playlist->entries = g_queue_new ();
+ 
++  if (duration_format) {
++    playlist->duration_format = g_strdup (duration_format);
++  } else {
++    /* The same as g_ascii_dtostr() */
++    playlist->duration_format = g_strdup ("%.17g");
++  }
++
+   return playlist;
+ }
+ 
+@@ -90,6 +104,7 @@ gst_m3u8_playlist_free (GstM3U8Playlist * playlist)
+ 
+   g_queue_foreach (playlist->entries, (GFunc) gst_m3u8_entry_free, NULL);
+   g_queue_free (playlist->entries);
++  g_free (playlist->duration_format);
+   g_free (playlist);
+ }
+ 
+@@ -175,8 +190,8 @@ gst_m3u8_playlist_render (GstM3U8Playlist * playlist)
+           entry->title ? entry->title : "");
+     } else {
+       g_string_append_printf (playlist_str, "#EXTINF:%s,%s\n",
+-          g_ascii_dtostr (buf, sizeof (buf), entry->duration / GST_SECOND),
+-          entry->title ? entry->title : "");
++          g_ascii_formatd (buf, sizeof (buf), playlist->duration_format,
++              entry->duration / GST_SECOND), entry->title ? entry->title : "");
+     }
+ 
+     g_string_append_printf (playlist_str, "%s\n", entry->url);
+diff --git a/ext/hls/gstm3u8playlist.h b/ext/hls/gstm3u8playlist.h
+index 016368e5f..8209bcfc2 100644
+--- a/ext/hls/gstm3u8playlist.h
++++ b/ext/hls/gstm3u8playlist.h
+@@ -35,6 +35,7 @@ struct _GstM3U8Playlist
+   gint type;
+   gboolean end_list;
+   guint sequence_number;
++  gchar *duration_format;
+ 
+   /*< Private >*/
+   GQueue *entries;
+@@ -51,6 +52,10 @@ typedef enum
+ GstM3U8Playlist * gst_m3u8_playlist_new (guint version,
+ 				         guint window_size);
+ 
++GstM3U8Playlist * gst_m3u8_playlist_new_full (guint version,
++                                              guint window_size,
++                                              const gchar * duration_format);
++
+ void              gst_m3u8_playlist_free (GstM3U8Playlist * playlist);
+ 
+ gboolean          gst_m3u8_playlist_add_entry (GstM3U8Playlist * playlist,
+diff --git a/ext/hls/meson.build b/ext/hls/meson.build
+index 3444d37e7..5d424bb4f 100644
+--- a/ext/hls/meson.build
++++ b/ext/hls/meson.build
+@@ -5,6 +5,7 @@ hls_sources = [
+   'gsthlsplugin.c',
+   'gsthlssink.c',
+   'gsthlssink2.c',
++  'gsthlswebvttsink.c',
+   'gstm3u8playlist.c',
+   'm3u8.c',
+ ]
+-- 
+2.20.1.windows.1
+

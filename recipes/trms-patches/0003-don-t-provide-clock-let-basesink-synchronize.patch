@@ -1,0 +1,445 @@
+From 4904d81cafbb8cb64df8f6066f2c9bcadc4db7ed Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Fri, 11 Dec 2020 00:13:39 +0100
+Subject: [PATCH 3/4] don't provide clock, let basesink synchronize
+
+---
+ sys/decklink/gstdecklinkvideosink.cpp | 322 ++++++++++++--------------
+ sys/decklink/gstdecklinkvideosink.h   |   2 +
+ 2 files changed, 147 insertions(+), 177 deletions(-)
+
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index 6cfba937f..51cb5bd88 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -198,15 +198,15 @@ public:
+ 
+     switch (result) {
+       case bmdOutputFrameCompleted:
+-        GST_LOG_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
++        GST_ERROR_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDisplayedLate:
+-        GST_INFO_OBJECT (m_sink, "Late frame %p for %" GST_TIME_FORMAT,
++        GST_ERROR_OBJECT (m_sink, "Late frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDropped:
+-        GST_INFO_OBJECT (m_sink, "Dropped frame %p for %" GST_TIME_FORMAT,
++        GST_ERROR_OBJECT (m_sink, "Dropped frame %p for %" GST_TIME_FORMAT,
+             completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameFlushed:
+@@ -270,14 +270,11 @@ static void gst_decklink_video_sink_finalize (GObject * object);
+ static GstStateChangeReturn
+ gst_decklink_video_sink_change_state (GstElement * element,
+     GstStateChange transition);
+-static GstClock *gst_decklink_video_sink_provide_clock (GstElement * element);
+ 
+ static GstCaps *gst_decklink_video_sink_get_caps (GstBaseSink * bsink,
+     GstCaps * filter);
+ static gboolean gst_decklink_video_sink_set_caps (GstBaseSink * bsink,
+     GstCaps * caps);
+-static GstFlowReturn gst_decklink_video_sink_prepare (GstBaseSink * bsink,
+-    GstBuffer * buffer);
+ static GstFlowReturn gst_decklink_video_sink_render (GstBaseSink * bsink,
+     GstBuffer * buffer);
+ static gboolean gst_decklink_video_sink_open (GstBaseSink * bsink);
+@@ -319,14 +316,11 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
+ 
+   element_class->change_state =
+       GST_DEBUG_FUNCPTR (gst_decklink_video_sink_change_state);
+-  element_class->provide_clock =
+-      GST_DEBUG_FUNCPTR (gst_decklink_video_sink_provide_clock);
+ 
+   basesink_class->get_caps =
+       GST_DEBUG_FUNCPTR (gst_decklink_video_sink_get_caps);
+   basesink_class->set_caps =
+       GST_DEBUG_FUNCPTR (gst_decklink_video_sink_set_caps);
+-  basesink_class->prepare = GST_DEBUG_FUNCPTR (gst_decklink_video_sink_prepare);
+   basesink_class->render = GST_DEBUG_FUNCPTR (gst_decklink_video_sink_render);
+   // FIXME: These are misnamed in basesink!
+   basesink_class->start = GST_DEBUG_FUNCPTR (gst_decklink_video_sink_open);
+@@ -664,8 +658,6 @@ gst_decklink_video_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
+   g_mutex_lock (&self->output->lock);
+   self->output->mode = mode;
+   self->output->video_enabled = TRUE;
+-  if (self->output->start_scheduled_playback)
+-    self->output->start_scheduled_playback (self->output->videosink);
+   g_mutex_unlock (&self->output->lock);
+ 
+   if (self->vbiencoder) {
+@@ -711,9 +703,148 @@ gst_decklink_video_sink_get_caps (GstBaseSink * bsink, GstCaps * filter)
+   return caps;
+ }
+ 
++static void
++write_vbi (GstDecklinkVideoSink * self, GstBuffer * buffer,
++    BMDPixelFormat format, IDeckLinkMutableVideoFrame * frame,
++    GstVideoTimeCodeMeta * tc_meta);
++
+ static GstFlowReturn
+ gst_decklink_video_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
+ {
++  GstDecklinkVideoSink *self = GST_DECKLINK_VIDEO_SINK_CAST (bsink);
++  GstVideoFrame vframe;
++  IDeckLinkMutableVideoFrame *frame;
++  guint8 *outdata, *indata;
++  GstFlowReturn flow_ret;
++  HRESULT ret;
++  GstClockTime timestamp, duration;
++  GstClockTime running_time, running_time_duration;
++  gint i;
++  GstDecklinkVideoFormat caps_format;
++  BMDPixelFormat format;
++  gint stride;
++  GstVideoTimeCodeMeta *tc_meta;
++
++  GST_ERROR_OBJECT (self, "Rendering buffer %" GST_PTR_FORMAT, buffer);
++
++  // FIXME: Handle no timestamps
++  if (!GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
++    return GST_FLOW_ERROR;
++  }
++
++  caps_format = gst_decklink_type_from_video_format (self->info.finfo->format);
++  format = gst_decklink_pixel_format_from_type (caps_format);
++
++  timestamp = GST_BUFFER_TIMESTAMP (buffer);
++  duration = GST_BUFFER_DURATION (buffer);
++  if (duration == GST_CLOCK_TIME_NONE) {
++    duration =
++        gst_util_uint64_scale_int (GST_SECOND, self->info.fps_d,
++        self->info.fps_n);
++  }
++  running_time =
++      gst_segment_to_running_time (&GST_BASE_SINK_CAST (self)->segment,
++      GST_FORMAT_TIME, timestamp);
++  running_time_duration =
++      gst_segment_to_running_time (&GST_BASE_SINK_CAST (self)->segment,
++      GST_FORMAT_TIME, timestamp + duration) - running_time;
++
++  GST_ERROR ("Rendering with rtime %" GST_TIME_FORMAT, GST_TIME_ARGS (running_time));
++
++  ret = self->output->output->CreateVideoFrame (self->info.width,
++      self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
++      &frame);
++  if (ret != S_OK) {
++    GST_ELEMENT_ERROR (self, STREAM, FAILED,
++        (NULL), ("Failed to create video frame: 0x%08lx", (unsigned long) ret));
++    return GST_FLOW_ERROR;
++  }
++
++  if (!gst_video_frame_map (&vframe, &self->info, buffer, GST_MAP_READ)) {
++    GST_ERROR_OBJECT (self, "Failed to map video frame");
++    flow_ret = GST_FLOW_ERROR;
++    goto out;
++  }
++
++  frame->GetBytes ((void **) &outdata);
++  indata = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&vframe, 0);
++  stride =
++      MIN (GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0), frame->GetRowBytes ());
++  for (i = 0; i < self->info.height; i++) {
++    memcpy (outdata, indata, stride);
++    indata += GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0);
++    outdata += frame->GetRowBytes ();
++  }
++  gst_video_frame_unmap (&vframe);
++
++  tc_meta = gst_buffer_get_video_time_code_meta (buffer);
++  if (tc_meta) {
++    BMDTimecodeFlags bflags = (BMDTimecodeFlags) 0;
++    gchar *tc_str;
++
++    if (((GstVideoTimeCodeFlags) (tc_meta->tc.
++                config.flags)) & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME)
++      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeIsDropFrame);
++    else
++      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFlagDefault);
++    if (tc_meta->tc.field_count == 2)
++      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFieldMark);
++
++    tc_str = gst_video_time_code_to_string (&tc_meta->tc);
++    ret = frame->SetTimecodeFromComponents (self->timecode_format,
++        (uint8_t) tc_meta->tc.hours,
++        (uint8_t) tc_meta->tc.minutes,
++        (uint8_t) tc_meta->tc.seconds, (uint8_t) tc_meta->tc.frames, bflags);
++    if (ret != S_OK) {
++      GST_ERROR_OBJECT (self,
++          "Failed to set timecode %s to video frame: 0x%08lx", tc_str,
++          (unsigned long) ret);
++      flow_ret = GST_FLOW_ERROR;
++      g_free (tc_str);
++      goto out;
++    }
++    GST_DEBUG_OBJECT (self, "Set frame timecode to %s", tc_str);
++    g_free (tc_str);
++  }
++
++  write_vbi (self, buffer, format, frame, tc_meta);
++
++  GST_ERROR_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
++      " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
++      GST_TIME_ARGS (running_time_duration));
++
++  ret = self->output->output->ScheduleVideoFrame (frame,
++      running_time, running_time_duration, GST_SECOND);
++  if (ret != S_OK) {
++    GST_ELEMENT_ERROR (self, STREAM, FAILED,
++        (NULL), ("Failed to schedule frame: 0x%08lx", (unsigned long) ret));
++    flow_ret = GST_FLOW_ERROR;
++    goto out;
++  }
++
++  {
++    GstClockTime decklink_time;
++    gdouble rate;
++    GstClockTimeDiff diff;
++
++    self->output->output->GetScheduledStreamTime(GST_SECOND, (BMDTimeValue *) &decklink_time, &rate);
++    diff = running_time - decklink_time;
++    GST_ERROR ("Decklink Diff %ld", diff);
++  }
++
++  flow_ret = GST_FLOW_OK;
++
++  g_mutex_lock (&self->output->lock);
++  self->decklink_base_time = running_time;
++  if (!self->output->started && self->output->start_scheduled_playback)
++    self->output->start_scheduled_playback (self->output->videosink);
++  g_mutex_unlock (&self->output->lock);
++
++out:
++
++  frame->Release ();
++
++  return flow_ret;
+   return GST_FLOW_OK;
+ }
+ 
+@@ -1211,154 +1342,6 @@ write_vbi (GstDecklinkVideoSink * self, GstBuffer * buffer,
+   }
+ }
+ 
+-static GstFlowReturn
+-gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
+-{
+-  GstDecklinkVideoSink *self = GST_DECKLINK_VIDEO_SINK_CAST (bsink);
+-  GstVideoFrame vframe;
+-  IDeckLinkMutableVideoFrame *frame;
+-  guint8 *outdata, *indata;
+-  GstFlowReturn flow_ret;
+-  HRESULT ret;
+-  GstClockTime timestamp, duration;
+-  GstClockTime running_time, running_time_duration;
+-  GstClockTime latency, render_delay;
+-  GstClockTimeDiff ts_offset;
+-  gint i;
+-  GstDecklinkVideoFormat caps_format;
+-  BMDPixelFormat format;
+-  gint stride;
+-  GstVideoTimeCodeMeta *tc_meta;
+-
+-  GST_DEBUG_OBJECT (self, "Preparing buffer %" GST_PTR_FORMAT, buffer);
+-
+-  // FIXME: Handle no timestamps
+-  if (!GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
+-    return GST_FLOW_ERROR;
+-  }
+-
+-  caps_format = gst_decklink_type_from_video_format (self->info.finfo->format);
+-  format = gst_decklink_pixel_format_from_type (caps_format);
+-
+-  timestamp = GST_BUFFER_TIMESTAMP (buffer);
+-  duration = GST_BUFFER_DURATION (buffer);
+-  if (duration == GST_CLOCK_TIME_NONE) {
+-    duration =
+-        gst_util_uint64_scale_int (GST_SECOND, self->info.fps_d,
+-        self->info.fps_n);
+-  }
+-  running_time =
+-      gst_segment_to_running_time (&GST_BASE_SINK_CAST (self)->segment,
+-      GST_FORMAT_TIME, timestamp);
+-  running_time_duration =
+-      gst_segment_to_running_time (&GST_BASE_SINK_CAST (self)->segment,
+-      GST_FORMAT_TIME, timestamp + duration) - running_time;
+-
+-  /* See gst_base_sink_adjust_time() */
+-  latency = gst_base_sink_get_latency (bsink);
+-  render_delay = gst_base_sink_get_render_delay (bsink);
+-  ts_offset = gst_base_sink_get_ts_offset (bsink);
+-
+-  running_time += latency;
+-
+-  if (ts_offset < 0) {
+-    ts_offset = -ts_offset;
+-    if ((GstClockTime) ts_offset < running_time)
+-      running_time -= ts_offset;
+-    else
+-      running_time = 0;
+-  } else {
+-    running_time += ts_offset;
+-  }
+-
+-  if (running_time > render_delay)
+-    running_time -= render_delay;
+-  else
+-    running_time = 0;
+-
+-  ret = self->output->output->CreateVideoFrame (self->info.width,
+-      self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
+-      &frame);
+-  if (ret != S_OK) {
+-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
+-        (NULL), ("Failed to create video frame: 0x%08lx", (unsigned long) ret));
+-    return GST_FLOW_ERROR;
+-  }
+-
+-  if (!gst_video_frame_map (&vframe, &self->info, buffer, GST_MAP_READ)) {
+-    GST_ERROR_OBJECT (self, "Failed to map video frame");
+-    flow_ret = GST_FLOW_ERROR;
+-    goto out;
+-  }
+-
+-  frame->GetBytes ((void **) &outdata);
+-  indata = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&vframe, 0);
+-  stride =
+-      MIN (GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0), frame->GetRowBytes ());
+-  for (i = 0; i < self->info.height; i++) {
+-    memcpy (outdata, indata, stride);
+-    indata += GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0);
+-    outdata += frame->GetRowBytes ();
+-  }
+-  gst_video_frame_unmap (&vframe);
+-
+-  tc_meta = gst_buffer_get_video_time_code_meta (buffer);
+-  if (tc_meta) {
+-    BMDTimecodeFlags bflags = (BMDTimecodeFlags) 0;
+-    gchar *tc_str;
+-
+-    if (((GstVideoTimeCodeFlags) (tc_meta->tc.
+-                config.flags)) & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME)
+-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeIsDropFrame);
+-    else
+-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFlagDefault);
+-    if (tc_meta->tc.field_count == 2)
+-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFieldMark);
+-
+-    tc_str = gst_video_time_code_to_string (&tc_meta->tc);
+-    ret = frame->SetTimecodeFromComponents (self->timecode_format,
+-        (uint8_t) tc_meta->tc.hours,
+-        (uint8_t) tc_meta->tc.minutes,
+-        (uint8_t) tc_meta->tc.seconds, (uint8_t) tc_meta->tc.frames, bflags);
+-    if (ret != S_OK) {
+-      GST_ERROR_OBJECT (self,
+-          "Failed to set timecode %s to video frame: 0x%08lx", tc_str,
+-          (unsigned long) ret);
+-      flow_ret = GST_FLOW_ERROR;
+-      g_free (tc_str);
+-      goto out;
+-    }
+-    GST_DEBUG_OBJECT (self, "Set frame timecode to %s", tc_str);
+-    g_free (tc_str);
+-  }
+-
+-  write_vbi (self, buffer, format, frame, tc_meta);
+-
+-  gst_decklink_video_sink_convert_to_internal_clock (self, &running_time,
+-      &running_time_duration);
+-
+-  GST_LOG_OBJECT (self, "Scheduling video frame %p at %" GST_TIME_FORMAT
+-      " with duration %" GST_TIME_FORMAT, frame, GST_TIME_ARGS (running_time),
+-      GST_TIME_ARGS (running_time_duration));
+-
+-  ret = self->output->output->ScheduleVideoFrame (frame,
+-      running_time, running_time_duration, GST_SECOND);
+-  if (ret != S_OK) {
+-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
+-        (NULL), ("Failed to schedule frame: 0x%08lx", (unsigned long) ret));
+-    flow_ret = GST_FLOW_ERROR;
+-    goto out;
+-  }
+-
+-  flow_ret = GST_FLOW_OK;
+-
+-out:
+-
+-  frame->Release ();
+-
+-  return flow_ret;
+-}
+-
+ static gboolean
+ gst_decklink_video_sink_open (GstBaseSink * bsink)
+ {
+@@ -1391,6 +1374,7 @@ gst_decklink_video_sink_open (GstBaseSink * bsink)
+   GST_OBJECT_LOCK (self);
+   self->internal_base_time = GST_CLOCK_TIME_NONE;
+   self->external_base_time = GST_CLOCK_TIME_NONE;
++  self->decklink_base_time = GST_CLOCK_TIME_NONE;
+   GST_OBJECT_UNLOCK (self);
+   g_mutex_unlock (&self->output->lock);
+ 
+@@ -1528,12 +1512,12 @@ gst_decklink_video_sink_start_scheduled_playback (GstElement * element)
+     _wait_for_stop_notify (self);
+   }
+ 
+-  GST_INFO_OBJECT (self,
++  GST_ERROR_OBJECT (self,
+       "Starting scheduled playback at %" GST_TIME_FORMAT,
+       GST_TIME_ARGS (start_time));
+ 
+   res =
+-      self->output->output->StartScheduledPlayback (start_time,
++      self->output->output->StartScheduledPlayback (self->decklink_base_time,
+       GST_SECOND, 1.0);
+   if (res != S_OK) {
+     GST_ELEMENT_ERROR (self, STREAM, FAILED,
+@@ -1604,11 +1588,6 @@ gst_decklink_video_sink_change_state (GstElement * element,
+       self->output->clock_epoch += self->output->clock_last_time;
+       self->output->clock_last_time = 0;
+       self->output->clock_offset = 0;
+-      g_mutex_unlock (&self->output->lock);
+-      gst_element_post_message (element,
+-          gst_message_new_clock_provide (GST_OBJECT_CAST (element),
+-              self->output->clock, TRUE));
+-      g_mutex_lock (&self->output->lock);
+       if (self->output->start_scheduled_playback)
+         self->output->start_scheduled_playback (self->output->videosink);
+       g_mutex_unlock (&self->output->lock);
+@@ -1735,17 +1714,6 @@ gst_decklink_video_sink_event (GstBaseSink * bsink, GstEvent * event)
+   return GST_BASE_SINK_CLASS (parent_class)->event (bsink, event);
+ }
+ 
+-static GstClock *
+-gst_decklink_video_sink_provide_clock (GstElement * element)
+-{
+-  GstDecklinkVideoSink *self = GST_DECKLINK_VIDEO_SINK_CAST (element);
+-
+-  if (!self->output)
+-    return NULL;
+-
+-  return GST_CLOCK_CAST (gst_object_ref (self->output->clock));
+-}
+-
+ static gboolean
+ gst_decklink_video_sink_propose_allocation (GstBaseSink * bsink,
+     GstQuery * query)
+diff --git a/sys/decklink/gstdecklinkvideosink.h b/sys/decklink/gstdecklinkvideosink.h
+index 06f5b762f..a8369fa7e 100644
+--- a/sys/decklink/gstdecklinkvideosink.h
++++ b/sys/decklink/gstdecklinkvideosink.h
+@@ -59,6 +59,8 @@ struct _GstDecklinkVideoSink
+ 
+   GstVideoInfo info;
+ 
++  GstClockTime decklink_base_time;
++
+   GstClockTime internal_base_time;
+   GstClockTime external_base_time;
+ 
+-- 
+2.20.1.windows.1
+

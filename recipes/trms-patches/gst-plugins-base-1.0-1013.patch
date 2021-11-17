@@ -1,0 +1,55 @@
+From 4c4a19663855e92cc6ca9a033d119c6f5aaa7312 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sebastian=20Dr=C3=B6ge?= <sebastian@centricular.com>
+Date: Tue, 19 Jan 2021 10:23:12 +0200
+Subject: [PATCH] typefindfunctions: Consider the number of atoms found in a
+ row for suggesting a probability
+
+If there are 2 or more known atoms in a row, it's likely that this is
+actually MOV/MP4 even if we don't find any other known atoms. If 5 or
+more are found then this is most certainly MOV/MP4 and we can return.
+
+Fixes typefinding of various MOV files that have no `ftyp` atom but
+otherwise a valid file structure followed by some garbage.
+---
+ gst/typefind/gsttypefindfunctions.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/gst/typefind/gsttypefindfunctions.c b/gst/typefind/gsttypefindfunctions.c
+index 7635e4dcb..35e0540bc 100644
+--- a/gst/typefind/gsttypefindfunctions.c
++++ b/gst/typefind/gsttypefindfunctions.c
+@@ -3383,6 +3383,7 @@ qt_type_find (GstTypeFind * tf, gpointer unused)
+ {
+   const guint8 *data;
+   guint tip = 0;
++  guint atoms_in_a_row = 0;
+   guint64 offset = 0;
+   guint64 size;
+   const gchar *variant = NULL;
+@@ -3435,6 +3436,11 @@ qt_type_find (GstTypeFind * tf, gpointer unused)
+       } else {
+         tip = GST_TYPE_FIND_NEARLY_CERTAIN;
+       }
++      atoms_in_a_row += 1;
++      if (atoms_in_a_row >= 5) {
++        tip = GST_TYPE_FIND_MAXIMUM;
++        break;
++      }
+     }
+     /* other box/atom types, apparently quicktime specific */
+     else if (STRNCMP (&data[4], "pnot", 4) == 0 ||
+@@ -3444,7 +3450,10 @@ qt_type_find (GstTypeFind * tf, gpointer unused)
+       tip = GST_TYPE_FIND_MAXIMUM;
+       break;
+     } else {
+-      tip = 0;
++      if (atoms_in_a_row >= 2)
++        tip = GST_TYPE_FIND_LIKELY;
++      else
++        tip = 0;
+       break;
+     }
+ 
+-- 
+GitLab
+

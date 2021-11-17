@@ -1,0 +1,99 @@
+From 3a1816bf3f04622b63e9cb1aba3a3a09c110d9be Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Wed, 21 Apr 2021 02:02:48 +0900
+Subject: [PATCH 1/2] uridecodebin: Use gst_object_ref instead of g_object_ref
+
+It's more debugging friendly (tracer for example)
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-base/-/merge_requests/1113>
+---
+ gst/playback/gsturidecodebin.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gst/playback/gsturidecodebin.c b/gst/playback/gsturidecodebin.c
+index 17ea666ac..3837b25b9 100644
+--- a/gst/playback/gsturidecodebin.c
++++ b/gst/playback/gsturidecodebin.c
+@@ -1683,7 +1683,7 @@ remove_decoders (GstURIDecodeBin * bin, gboolean force)
+ 
+       gst_element_set_state (decoder, GST_STATE_READY);
+       /* add it to our list of pending decodebins */
+-      g_object_ref (decoder);
++      gst_object_ref (decoder);
+       gst_bin_remove (GST_BIN_CAST (bin), decoder);
+       /* restore some properties we might have changed */
+       g_object_set (decoder, "sink-caps", NULL, NULL);
+-- 
+GitLab
+
+
+From e7855606876f558490e62d0af8cc79db1f12edb0 Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Wed, 21 Apr 2021 02:05:36 +0900
+Subject: [PATCH 2/2] uridecodebin: Don't force floating reference for future
+ reusable decodebin
+
+uridecodebin assumes that refcount of decodebins stored in pending_decodebins
+are floating but it might not be true in case that refcount of the decodebin
+was touched in other places. To avoid the floating refcount issue,
+hold strong reference.
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-base/-/merge_requests/1113>
+---
+ gst/playback/gsturidecodebin.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/gst/playback/gsturidecodebin.c b/gst/playback/gsturidecodebin.c
+index 3837b25b9..dc6984d98 100644
+--- a/gst/playback/gsturidecodebin.c
++++ b/gst/playback/gsturidecodebin.c
+@@ -101,7 +101,9 @@ struct _GstURIDecodeBin
+   GstElement *queue;
+   GstElement *typefind;
+   guint have_type_id;           /* have-type signal id from typefind */
++  /* without holding ref */
+   GSList *decodebins;
++  /* Holding strong reference to decodebin */
+   GSList *pending_decodebins;
+   GHashTable *streams;
+   guint numpads;
+@@ -1690,8 +1692,6 @@ remove_decoders (GstURIDecodeBin * bin, gboolean force)
+       caps = DEFAULT_CAPS;
+       g_object_set (decoder, "caps", caps, NULL);
+       gst_caps_unref (caps);
+-      /* make it freshly floating again */
+-      g_object_force_floating (G_OBJECT (decoder));
+ 
+       bin->pending_decodebins =
+           g_slist_prepend (bin->pending_decodebins, decoder);
+@@ -1810,6 +1810,7 @@ static GstElement *
+ make_decoder (GstURIDecodeBin * decoder)
+ {
+   GstElement *decodebin;
++  gboolean unref_dbin = FALSE;
+ 
+   /* re-use pending decodebin */
+   if (decoder->pending_decodebins) {
+@@ -1818,6 +1819,7 @@ make_decoder (GstURIDecodeBin * decoder)
+     decodebin = (GstElement *) first->data;
+     decoder->pending_decodebins =
+         g_slist_delete_link (decoder->pending_decodebins, first);
++    unref_dbin = TRUE;
+   } else {
+     GST_LOG_OBJECT (decoder, "making new decodebin");
+ 
+@@ -1900,6 +1902,11 @@ make_decoder (GstURIDecodeBin * decoder)
+   gst_bin_add (GST_BIN_CAST (decoder), decodebin);
+ 
+   decoder->decodebins = g_slist_prepend (decoder->decodebins, decodebin);
++  /* Unref if this decodebin came from our pending_decodebins,
++   * since we were holding strong reference to decodebin and gst_bin_add()
++   * will increase refcount */
++  if (unref_dbin)
++    gst_object_unref (decodebin);
+ 
+   return decodebin;
+ 
+-- 
+GitLab
+

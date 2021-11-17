@@ -1,0 +1,25 @@
+From 488342da0e79fd0b09c7132d4ef92fad53ad1fbc Mon Sep 17 00:00:00 2001
+From: Ray Tiley <ray.tiley@trms.com>
+Date: Mon, 26 Apr 2021 09:56:40 -0400
+Subject: [PATCH 5/5] Dump vbi line
+
+---
+ sys/decklink/gstdecklinkvideosrc.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/sys/decklink/gstdecklinkvideosrc.cpp b/sys/decklink/gstdecklinkvideosrc.cpp
+index 91c0b09bd..7406fbd62 100644
+--- a/sys/decklink/gstdecklinkvideosrc.cpp
++++ b/sys/decklink/gstdecklinkvideosrc.cpp
+@@ -929,6 +929,8 @@ extract_vbi_line (GstDecklinkVideoSrc * self, GstBuffer ** buffer,
+       field2_offset + line, field2_offset ? 2 : 1);
+   gst_video_vbi_parser_add_line (self->vbiparser, vancdata);
+ 
++    GST_MEMDUMP_OBJECT (self, "vbi line", vancdata, 128);
++
+   /* Check if CC or AFD/Bar is on this line if we didn't find any on a
+    * previous line. Remember the line where we found them */
+ 
+-- 
+2.20.1.windows.1
+

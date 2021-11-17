@@ -1,0 +1,80 @@
+From 8f2cab6c03ea095b9fe728e83264ae1e119db009 Mon Sep 17 00:00:00 2001
+From: Seungha Yang <seungha@centricular.com>
+Date: Wed, 30 Dec 2020 01:15:16 +0900
+Subject: [PATCH] avauddec: Drain decoder on decoding failure
+
+... and call finish_frame() so that baseclass can reset internal
+status. Otherwise baseclass will keep holding the status for
+decoding failed frame which will result in outputting buffer with
+wrong timestamp.
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-libav/-/merge_requests/112>
+---
+ ext/libav/gstavauddec.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/ext/libav/gstavauddec.c b/ext/libav/gstavauddec.c
+index 6801bbd..baf7aa5 100644
+--- a/ext/libav/gstavauddec.c
++++ b/ext/libav/gstavauddec.c
+@@ -57,7 +57,8 @@ static GstFlowReturn gst_ffmpegauddec_handle_frame (GstAudioDecoder * decoder,
+ static gboolean gst_ffmpegauddec_negotiate (GstFFMpegAudDec * ffmpegdec,
+     AVCodecContext * context, AVFrame * frame, gboolean force);
+ 
+-static GstFlowReturn gst_ffmpegauddec_drain (GstFFMpegAudDec * ffmpegdec);
++static GstFlowReturn gst_ffmpegauddec_drain (GstFFMpegAudDec * ffmpegdec,
++    gboolean force);
+ 
+ #define GST_FFDEC_PARAMS_QDATA g_quark_from_static_string("avdec-params")
+ 
+@@ -319,7 +320,7 @@ gst_ffmpegauddec_set_format (GstAudioDecoder * decoder, GstCaps * caps)
+   /* close old session */
+   if (ffmpegdec->opened) {
+     GST_OBJECT_UNLOCK (ffmpegdec);
+-    gst_ffmpegauddec_drain (ffmpegdec);
++    gst_ffmpegauddec_drain (ffmpegdec, FALSE);
+     GST_OBJECT_LOCK (ffmpegdec);
+     if (!gst_ffmpegauddec_close (ffmpegdec, TRUE)) {
+       GST_OBJECT_UNLOCK (ffmpegdec);
+@@ -595,7 +596,7 @@ no_codec:
+ }
+ 
+ static GstFlowReturn
+-gst_ffmpegauddec_drain (GstFFMpegAudDec * ffmpegdec)
++gst_ffmpegauddec_drain (GstFFMpegAudDec * ffmpegdec, gboolean force)
+ {
+   GstFlowReturn ret = GST_FLOW_OK;
+   gboolean got_any_frames = FALSE;
+@@ -619,7 +620,7 @@ gst_ffmpegauddec_drain (GstFFMpegAudDec * ffmpegdec)
+   if (ret == GST_FLOW_EOS)
+     ret = GST_FLOW_OK;
+ 
+-  if (got_any_frames) {
++  if (got_any_frames || force) {
+     GstFlowReturn new_ret =
+         gst_audio_decoder_finish_frame (GST_AUDIO_DECODER (ffmpegdec), NULL, 1);
+ 
+@@ -665,7 +666,7 @@ gst_ffmpegauddec_handle_frame (GstAudioDecoder * decoder, GstBuffer * inbuf)
+     goto not_negotiated;
+ 
+   if (inbuf == NULL) {
+-    return gst_ffmpegauddec_drain (ffmpegdec);
++    return gst_ffmpegauddec_drain (ffmpegdec, FALSE);
+   }
+ 
+   inbuf = gst_buffer_ref (inbuf);
+@@ -771,6 +772,11 @@ not_negotiated:
+ send_packet_failed:
+   {
+     GST_WARNING_OBJECT (ffmpegdec, "decoding error");
++    /* Even if ffmpeg was not able to decode current audio frame,
++     * we should call gst_audio_decoder_finish_frame() so that baseclass
++     * can clear its internal status and can respect timestamp of later
++     * incoming buffers */
++    ret = gst_ffmpegauddec_drain (ffmpegdec, TRUE);
+     goto unmap;
+   }
+ }
+-- 
+GitLab
+

@@ -1,0 +1,61 @@
+From 9b6c1022c3154cc5fbc9394ebc93d930a4658979 Mon Sep 17 00:00:00 2001
+From: Matthew Waters <matthew@centricular.com>
+Date: Fri, 4 Dec 2020 20:49:23 +1100
+Subject: [PATCH 2/4] decklink/video: log frame completion times
+
+Allows correlating which frame was displayed when which could be used to
+figure out the vsync timings.
+---
+ sys/decklink/gstdecklinkvideosink.cpp | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/sys/decklink/gstdecklinkvideosink.cpp b/sys/decklink/gstdecklinkvideosink.cpp
+index d069cd070..6cfba937f 100644
+--- a/sys/decklink/gstdecklinkvideosink.cpp
++++ b/sys/decklink/gstdecklinkvideosink.cpp
+@@ -186,22 +186,36 @@ public:
+   virtual HRESULT WINAPI ScheduledFrameCompleted (IDeckLinkVideoFrame *
+       completedFrame, BMDOutputFrameCompletionResult result)
+   {
++    BMDTimeValue completion_time;
++    HRESULT ret;
++
++    if ((ret = m_sink->output->output->GetFrameCompletionReferenceTimestamp (
++          completedFrame, GST_SECOND, &completion_time) != S_OK)) {
++      GST_ERROR_OBJECT (m_sink, "Failed to retrieve reference timestamp: "
++          "0x%08lx", (unsigned long) ret);
++      return ret;
++    }
++
+     switch (result) {
+       case bmdOutputFrameCompleted:
+-        GST_LOG_OBJECT (m_sink, "Completed frame %p", completedFrame);
++        GST_LOG_OBJECT (m_sink, "Completed frame %p for %" GST_TIME_FORMAT,
++            completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDisplayedLate:
+-        GST_INFO_OBJECT (m_sink, "Late Frame %p", completedFrame);
++        GST_INFO_OBJECT (m_sink, "Late frame %p for %" GST_TIME_FORMAT,
++            completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameDropped:
+-        GST_INFO_OBJECT (m_sink, "Dropped Frame %p", completedFrame);
++        GST_INFO_OBJECT (m_sink, "Dropped frame %p for %" GST_TIME_FORMAT,
++            completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       case bmdOutputFrameFlushed:
+-        GST_DEBUG_OBJECT (m_sink, "Flushed Frame %p", completedFrame);
++        GST_DEBUG_OBJECT (m_sink, "Flushed frame %p for %" GST_TIME_FORMAT,
++            completedFrame, GST_TIME_ARGS (completion_time));
+         break;
+       default:
+-        GST_INFO_OBJECT (m_sink, "Unknown Frame %p: %d", completedFrame,
+-            (gint) result);
++        GST_INFO_OBJECT (m_sink, "Unknown Frame %p: %d for %" GST_TIME_FORMAT,
++            completedFrame, (gint) result, GST_TIME_ARGS (completion_time));
+         break;
+     }
+ 
+-- 
+2.20.1.windows.1
+

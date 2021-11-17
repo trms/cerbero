@@ -5,6 +5,7 @@ class Recipe(custom.GStreamer):
     name = 'gst-plugins-base-1.0'
     btype = BuildType.MESON
     tarball_checksum = 'cde304fd3c006b61a97894b5c4e6f4687edd52cab6767d536b09bdb78d31a513'
+    patches=['./trms-patches/gst-plugins-base-835.patch', './trms-patches/0001-WIP-Video-audio-meta.patch']
     meson_options = {# enabled plugins
                      'gl': 'enabled',
                      'gl-graphene': 'enabled',

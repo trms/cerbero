@@ -1,0 +1,55 @@
+From 1d8f2b2511465b548317514f3876a860e3f7bae6 Mon Sep 17 00:00:00 2001
+From: Mathieu Duponchelle <mathieu@centricular.com>
+Date: Thu, 15 Jul 2021 21:10:14 +0200
+Subject: [PATCH] cccombiner: fix scheduling with interlaced video buffers
+
+The initial code was written with the misunderstanding that
+IS_TOP_FIELD indicated that an interlaced buffer contained
+a top field, not that it contained only a top field
+
+Part-of: <https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/-/merge_requests/2413>
+---
+ ext/closedcaption/gstcccombiner.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/ext/closedcaption/gstcccombiner.c b/ext/closedcaption/gstcccombiner.c
+index aef5e6c366..e4b8434f37 100644
+--- a/ext/closedcaption/gstcccombiner.c
++++ b/ext/closedcaption/gstcccombiner.c
+@@ -853,7 +853,7 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
+         /* Only relevant in alternate and mixed mode, no need to look at the caps */
+         if (GST_BUFFER_FLAG_IS_SET (self->current_video_buffer,
+                 GST_VIDEO_BUFFER_FLAG_INTERLACED)) {
+-          if (GST_VIDEO_BUFFER_IS_TOP_FIELD (self->current_video_buffer)) {
++          if (!GST_VIDEO_BUFFER_IS_BOTTOM_FIELD (self->current_video_buffer)) {
+             dequeue_caption (self, tc, 0);
+           }
+         } else {
+@@ -867,11 +867,12 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
+         if (self->progressive) {
+           dequeue_caption (self, tc, 0);
+         } else if (GST_BUFFER_FLAG_IS_SET (self->current_video_buffer,
+-                GST_VIDEO_BUFFER_FLAG_INTERLACED)) {
++                GST_VIDEO_BUFFER_FLAG_INTERLACED) &&
++            GST_BUFFER_FLAG_IS_SET (self->current_video_buffer,
++                GST_VIDEO_BUFFER_FLAG_ONEFIELD)) {
+           if (GST_VIDEO_BUFFER_IS_TOP_FIELD (self->current_video_buffer)) {
+             dequeue_caption (self, tc, 0);
+-          }
+-          if (GST_VIDEO_BUFFER_IS_BOTTOM_FIELD (self->current_video_buffer)) {
++          } else {
+             dequeue_caption (self, tc, 1);
+           }
+         } else {
+@@ -886,7 +887,7 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
+           dequeue_caption (self, tc, 0);
+         } else if (GST_BUFFER_FLAG_IS_SET (self->current_video_buffer,
+                 GST_VIDEO_BUFFER_FLAG_INTERLACED)) {
+-          if (GST_VIDEO_BUFFER_IS_TOP_FIELD (self->current_video_buffer)) {
++          if (!GST_VIDEO_BUFFER_IS_BOTTOM_FIELD (self->current_video_buffer)) {
+             dequeue_caption (self, tc, 0);
+           }
+         } else {
+-- 
+GitLab
+

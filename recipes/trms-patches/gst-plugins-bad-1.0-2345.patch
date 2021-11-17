@@ -1,0 +1,43 @@
+From 18698766cab77c302b886b7c3faadf03bcf42620 Mon Sep 17 00:00:00 2001
+From: Edward Hervey <edward@centricular.com>
+Date: Mon, 21 Jun 2021 13:23:13 +0200
+Subject: [PATCH] mxfvanc: Handle empty ANC essence
+
+Not having any *actual* ANC is totally fine and common usage with several MXF
+variants.
+
+In order to properly advance the streams, we output an empty buffer is no actual
+content was in the ANC Essence Element.
+---
+ gst/mxf/mxfvanc.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/gst/mxf/mxfvanc.c b/gst/mxf/mxfvanc.c
+index 62a83d559a..b3334e8e1a 100644
+--- a/gst/mxf/mxfvanc.c
++++ b/gst/mxf/mxfvanc.c
+@@ -116,7 +116,7 @@ mxf_vanc_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
+     return GST_FLOW_ERROR;
+   }
+ 
+-  if (gst_buffer_get_size (buffer) < 18) {
++  if (gst_buffer_get_size (buffer) < 2) {
+     GST_ERROR ("Invalid VANC essence element size");
+     gst_buffer_unref (buffer);
+     return GST_FLOW_ERROR;
+@@ -126,6 +126,12 @@ mxf_vanc_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
+   gst_byte_reader_init (&reader, map.data, map.size);
+ 
+   num_packets = gst_byte_reader_get_uint16_be_unchecked (&reader);
++  if (num_packets == 0) {
++    /* Empty VANC are valid, there's just nothing in them */
++    *outbuf = gst_buffer_new ();
++    ret = GST_FLOW_OK;
++    goto out;
++  }
+   for (i = 0; i < num_packets; i++) {
+     G_GNUC_UNUSED guint16 line_num;
+     G_GNUC_UNUSED guint8 wrapping_type;
+-- 
+GitLab
+
