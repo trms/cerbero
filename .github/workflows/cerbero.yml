@@ -8,4 +8,5 @@ jobs:
     - name: Check out repository code
       uses: actions/checkout@v2
     - name: Build
-      run: C:\msys64\usr\bin\bash -lc "cd $GITHUB_WORKSPACE/cerbero && ./ci/cerbero_setup.sh cerbero_script"
+      run: echo $GITHUB_WORKSPACE
+      run: C:\msys64\usr\bin\bash -lc "cd %GITHUB_WORKSPACE%/cerbero && ./ci/cerbero_setup.sh cerbero_script"
