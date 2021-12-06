@@ -7,5 +7,5 @@ jobs:
     steps:
     - name: Check out repository code
       uses: actions/checkout@v2
-    - name: "Build"
+    - name: Build
       - run: - C:\MinGW\msys\1.0\bin\bash.exe --login -c "cd $GITHUB_WORKSPACE && ./ci/cerbero_setup.sh cerbero_script"
