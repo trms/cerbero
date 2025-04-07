@@ -1,0 +1,54 @@
+From 1db8339f40989865aa788dbff9c916351dcb8495 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 12 Mar 2024 10:10:00 +0100
+Subject: [PATCH 7/8] pangocoretext: rework wrong usage of GWeakRef in
+ PangoFcFont
+
+Casting a `PangoFontMap *fontmap` field to a `GWeakRef` is not correct.
+
+Either use GWeakRef API throughout, or don't.
+
+Don't use `GWeakRef` API. g_object_add_weak_pointer() is sufficient.
+It's not thread safe, but neither was the previous code.
+
+Fixes: a2b560ab7d7c ('Port PangoCoreTextFont to use GWeakRef')
+(cherry picked from commit 09fda25e1ae7b7b323178592e8001e7dbf9a0172)
+---
+ pango/pangocoretext.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/pango/pangocoretext.c b/pango/pangocoretext.c
+index 2fc176e4..b39a99f7 100644
+--- a/pango/pangocoretext.c
++++ b/pango/pangocoretext.c
+@@ -45,12 +45,9 @@ pango_core_text_font_finalize (GObject *object)
+ {
+   PangoCoreTextFont *ctfont = (PangoCoreTextFont *)object;
+   PangoCoreTextFontPrivate *priv = ctfont->priv;
+-  PangoCoreTextFontMap* fontmap = g_weak_ref_get ((GWeakRef *)&priv->fontmap);
+-  if (fontmap)
+-    {
+-      g_weak_ref_clear ((GWeakRef *)&priv->fontmap);
+-      g_object_unref (fontmap);
+-    }
++
++  if (priv->fontmap)
++    g_object_remove_weak_pointer (G_OBJECT (priv->fontmap), (gpointer *) &priv->fontmap);
+ 
+   if (priv->coverage)
+     g_object_unref (priv->coverage);
+@@ -215,7 +212,10 @@ _pango_core_text_font_set_font_map (PangoCoreTextFont    *font,
+   PangoCoreTextFontPrivate *priv = font->priv;
+ 
+   g_return_if_fail (priv->fontmap == NULL);
+-  g_weak_ref_set((GWeakRef *) &priv->fontmap, fontmap);
++
++  priv->fontmap = fontmap;
++  if (fontmap)
++    g_object_add_weak_pointer (G_OBJECT (fontmap), (gpointer *) &priv->fontmap);
+ }
+ 
+ PangoCoreTextFace *
+-- 
+2.47.0.windows.2
+

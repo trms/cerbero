@@ -1,0 +1,92 @@
+From 3ae91160e5757c905d46132e32b61b621c8af5b2 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 12 Mar 2024 10:10:00 +0100
+Subject: [PATCH 8/8] pangowin32-fontmap: fix wrong usage of GWeakRef in
+ PangoWin32Font
+
+Casting a `PangoFontMap *fontmap` field to a `GWeakRef` is not correct.
+
+Either use GWeakRef API throughout, or don't.
+
+In particular, assigning a plain pointer to the field (as done in
+_pango_cairo_win32_font_new()) and later treat it as GWeakRef leads to a
+crash.
+
+Don't use `GWeakRef` API. g_object_add_weak_pointer() is sufficient.
+It's not thread safe, but neither was the previous code.
+
+Fixes: 16e4dd37e5fd ('Port PangoWin32 to use GWeakRef')
+(cherry picked from commit 831f8d060711ae4b09ca8a74d46c8fd7656d8f26)
+---
+ pango/pangocairo-win32font.c | 8 ++++++--
+ pango/pangowin32-fontmap.c   | 7 ++++++-
+ pango/pangowin32.c           | 9 ++-------
+ 3 files changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/pango/pangocairo-win32font.c b/pango/pangocairo-win32font.c
+index 9f4f5c14..f73079f5 100644
+--- a/pango/pangocairo-win32font.c
++++ b/pango/pangocairo-win32font.c
+@@ -249,8 +249,12 @@ _pango_cairo_win32_font_new (PangoCairoWin32FontMap     *cwfontmap,
+   win32font = PANGO_WIN32_FONT (cwfont);
+ 
+   g_assert (win32font->fontmap == NULL);
+-  win32font->fontmap = (PangoFontMap *) cwfontmap;
+-  g_object_add_weak_pointer (G_OBJECT (win32font->fontmap), (gpointer *) (gpointer) &win32font->fontmap);
++
++  if (cwfontmap)
++    {
++      win32font->fontmap = (PangoFontMap *) cwfontmap;
++      g_object_add_weak_pointer (G_OBJECT (win32font->fontmap), (gpointer *) &win32font->fontmap);
++    }
+ 
+   win32font->win32face = face;
+ 
+diff --git a/pango/pangowin32-fontmap.c b/pango/pangowin32-fontmap.c
+index 9b980122..aa05cd24 100644
+--- a/pango/pangowin32-fontmap.c
++++ b/pango/pangowin32-fontmap.c
+@@ -1141,7 +1141,12 @@ pango_win32_font_neww (PangoFontMap   *fontmap,
+ 
+   if (G_UNLIKELY(result->fontmap))
+     return result;
+-  g_weak_ref_set ((GWeakRef *)&result->fontmap, fontmap);
++
++  if (fontmap)
++    {
++      result->fontmap = fontmap;
++      g_object_add_weak_pointer (G_OBJECT (fontmap), (gpointer *) &result->fontmap);
++    }
+ 
+   result->size = size;
+   _pango_win32_make_matching_logfontw (fontmap, lfp, size, &result->logfontw);
+diff --git a/pango/pangowin32.c b/pango/pangowin32.c
+index c68b04a5..3fe4d76c 100644
+--- a/pango/pangowin32.c
++++ b/pango/pangowin32.c
+@@ -828,7 +828,6 @@ pango_win32_font_finalize (GObject *object)
+ {
+   PangoWin32Font *win32font = (PangoWin32Font *)object;
+   PangoWin32FontCache *cache = pango_win32_font_map_get_font_cache (win32font->fontmap);
+-  PangoWin32Font *fontmap;
+ 
+   if (cache != NULL && win32font->hfont != NULL)
+     pango_win32_font_cache_unload (cache, win32font->hfont);
+@@ -841,12 +840,8 @@ pango_win32_font_finalize (GObject *object)
+ 
+   g_hash_table_destroy (win32font->glyph_info);
+ 
+-  fontmap = g_weak_ref_get ((GWeakRef *) &win32font->fontmap);
+-  if (fontmap)
+-  {
+-    g_object_remove_weak_pointer (G_OBJECT (win32font->fontmap), (gpointer *) (gpointer) &win32font->fontmap);
+-    g_object_unref (fontmap);
+-  }
++  if (win32font->fontmap)
++    g_object_remove_weak_pointer (G_OBJECT (win32font->fontmap), (gpointer *) &win32font->fontmap);
+ 
+   G_OBJECT_CLASS (_pango_win32_font_parent_class)->finalize (object);
+ }
+-- 
+2.47.0.windows.2
+
