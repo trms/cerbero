@@ -23,7 +23,7 @@ class Recipe(recipe.Recipe):
       # https://gitlab.gnome.org/GNOME/pango/-/merge_requests/720
       'pango/0006-pangofc-font-rework-wrong-usage-of-GWeakRef-in-Pango.patch',
       'pango/0007-pangocoretext-rework-wrong-usage-of-GWeakRef-in-Pang.patch',
-      'pango,0008-pangowin32-fontmap-fix-wrong-usage-of-GWeakRef-in-Pa.patch',
+      'pango/0008-pangowin32-fontmap-fix-wrong-usage-of-GWeakRef-in-Pa.patch',
     ]
 
     files_libs = ['libpangocairo-1.0', 'libpango-1.0', 'libpangoft2-1.0']
